@@ -39,11 +39,11 @@ class API_Handler {
         $this->token = get_option('dsn_woo_powerall_token');
         
         // Log authentication details (without exposing the full token)
-        $this->logger->info(sprintf(
-            'API Handler initialized with tenant: %s, token: %s...',
-            $this->tenant_name,
-            substr($this->token, 0, 4) . '...'
-        ));
+        // $this->logger->info(sprintf(
+        //     // 'API Handler initialized with tenant: %s, token: %s...',
+        //     $this->tenant_name,
+        //     substr($this->token, 0, 4) . '...'
+        // ));
     }
 
     /**
@@ -437,7 +437,7 @@ class API_Handler {
                     'ProductCode' => $item['sku'],
                     'QuantityOrdered' => intval($item['quantity']),
                     'GrossPrice' => floatval($item['price']),
-                    'PriceIncVat' => 0
+                    'PriceIncVat' => false
                 );
             }, $order_data['items']),
             'DeliveryAddress' => isset($order_data['shipping_address']) ? array(

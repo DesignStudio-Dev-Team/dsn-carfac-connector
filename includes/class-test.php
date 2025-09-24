@@ -29,8 +29,8 @@ class Test {
      */
     public function run_all_tests() {
         $this->test_api_connection();
-        $this->test_product_sync();
-        $this->test_order_sync();
+        $productCode = $this->test_product_sync();
+        $this->test_order_sync($productCode);
     }
 
     /**
@@ -71,15 +71,15 @@ class Test {
             return false;
         }
 
-        if (empty($response['data'])) {
+        if (empty($response['Data'])) {
             $this->logger->warning('No products found in Powerall CRM');
             return false;
         }
 
-        $product = $response['data'][0];
+        $product = $response['Data'][0];
         
         // Verify required fields
-        $required_fields = ['productCode', 'salesPrice', 'stock'];
+        $required_fields = ['ProductCode', 'Description1', 'SalesPrice', 'Stock'];
         $missing_fields = array();
         
         foreach ($required_fields as $field) {
@@ -96,13 +96,13 @@ class Test {
         // Log the product details
         $this->logger->info(sprintf(
             'Product found - Code: %s, Price: %s, Stock: %s',
-            $product['productCode'],
-            $product['salesPrice'],
+            $product['ProductCode'],
+            $product['SalesPrice'],
             json_encode($product['stock'])
         ));
 
         // Test stock check for this product
-        $stock_response = $this->api->get_product_stock($product['productCode']);
+        $stock_response = $this->api->get_product_stock($product['ProductCode']);
         
         if (is_wp_error($stock_response)) {
             $this->logger->error('Stock check test failed: ' . $stock_response->get_error_message());
@@ -110,16 +110,16 @@ class Test {
         }
 
         $this->logger->info('Product sync test successful');
-        return true;
+        return $product['ProductCode'];
     }
 
     /**
      * Test order synchronization
      */
-    public function test_order_sync() {
+    public function test_order_sync($productCode) {
         $this->logger->info('Starting order sync test');
 
-        // Create test order data
+        // Create test order data this is how WooCommerce will bring out the data
         $order_data = array(
             'order_number' => 19999992, // Use timestamp as order number
             'customer' => array(
@@ -129,7 +129,7 @@ class Test {
             ),
             'items' => array(
                 array(
-                    'sku' => '0000-000-0000', // Use the real product code we found
+                    'sku' => $productCode, // Use the real product code we found
                     'quantity' => 1,
                     'price' => 0.00 // Use the price we found
                 )

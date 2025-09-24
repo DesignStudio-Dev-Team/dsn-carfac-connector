@@ -125,7 +125,7 @@ class Order_Sync {
                 $items[] = array(
                     'product_id' => $powerall_id,
                     'quantity' => $item->get_quantity(),
-                    'price' => $item->get_total() / $item->get_quantity(),
+                    'price' => $item->get_total(),
                 );
             }
         }
