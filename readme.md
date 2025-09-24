@@ -11,23 +11,22 @@ A WordPress plugin that seamlessly integrates WooCommerce with Powerall CRM, ena
   - Support for product variants and attributes
 
 - **Inventory Management**
-  - Real-time stock level synchronization
-  - Pre-purchase stock verification
-  - Automatic stock updates after successful orders
-  - Stock level validation before order processing
+  - Real-time stock level synchronization*
+  - Pre-purchase stock verification*
+  - Automatic stock updates after successful orders*
+  - Stock level validation before order processing*
 
 - **Order Processing**
   - Automatic order creation in Powerall CRM
   - Invoice generation in Powerall CRM
   - Stock level updates in CRM after successful orders
-  - Support for shipping and billing address synchronization
   - Order simulation before actual creation
 
 - **Customer Management**
   - Automatic customer creation in Powerall CRM
-  - Customer data synchronization
-  - Support for both B2B and B2C customers
-  - Address management for shipping and billing
+  - Customer data synchronization*
+  - Support for both B2B and B2C customers*
+  - Address management for shipping and billing*
 
 ## Requirements
 
@@ -50,13 +49,10 @@ A WordPress plugin that seamlessly integrates WooCommerce with Powerall CRM, ena
 1. **API Settings**
    - Enter your Powerall CRM API Key
    - Configure API endpoint settings
-   - Set up logging preferences
+
 
 2. **Sync Settings**
    - Configure sync frequency (default: daily)
-   - Set up product sync options
-   - Configure order processing rules
-   - Set up customer sync preferences
 
 ## Usage
 
@@ -80,8 +76,6 @@ When a customer places an order:
 The plugin handles customer data:
 1. Creates new customers in Powerall CRM
 2. Syncs customer information between systems
-3. Manages shipping and billing addresses
-4. Supports both B2B and B2C customer types
 
 ## Testing
 
@@ -111,6 +105,9 @@ For support, please:
 ## License
 
 This plugin is licensed under the GPL v2 or later.
+
+## Disclaimer 
+Items with * at the end are coming soon or work in progress
 
 ## Credits
 

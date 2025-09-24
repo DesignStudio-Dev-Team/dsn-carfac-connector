@@ -101,6 +101,8 @@ class Test {
             json_encode($product['stock'])
         ));
 
+        //TODO: STOCK IS NOT COMING IN LIKE IN THE API DOC https://developers.powerall.nl/docs/entities/products/v1/get-products/
+        //TODO: OR AT ALL THERE IS NO STOCK ANYWHERE 
         // Test stock check for this product
         // $stock_response = $this->api->get_product_stock($product['ProductCode']);
         
