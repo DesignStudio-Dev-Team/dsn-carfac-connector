@@ -79,7 +79,7 @@ class Test {
         $product = $response['Data'][0];
         
         // Verify required fields
-        $required_fields = ['ProductCode', 'Description1', 'SalesPrice'];
+        $required_fields = ['ProductCode', 'Description1', 'SalesPrice', 'StockPerWarehouse'];
         $missing_fields = array();
         
         foreach ($required_fields as $field) {
@@ -98,18 +98,17 @@ class Test {
             'Product found - Code: %s, Price: %s, Stock: %s',
             $product['ProductCode'],
             $product['SalesPrice'],
-            json_encode($product['stock'])
+            json_encode($product['StockPerWarehouse'])
         ));
 
-        //TODO: STOCK IS NOT COMING IN LIKE IN THE API DOC https://developers.powerall.nl/docs/entities/products/v1/get-products/
-        //TODO: OR AT ALL THERE IS NO STOCK ANYWHERE 
+   
         // Test stock check for this product
-        // $stock_response = $this->api->get_product_stock($product['ProductCode']);
+        $stock_response = $this->api->get_product_stock($product['ProductCode']);
         
-        // if (is_wp_error($stock_response)) {
-        //     $this->logger->error('Stock check test failed: ' . $stock_response->get_error_message());
-        //     return false;
-        // }
+         if (is_wp_error($stock_response)) {
+             $this->logger->error('Stock check test failed: ' . $stock_response->get_error_message());
+             return false;
+         }
 
         $this->logger->info('Product sync test successful');
         return $product['ProductCode'];

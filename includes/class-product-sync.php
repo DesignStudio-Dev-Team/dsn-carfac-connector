@@ -114,6 +114,8 @@ class Product_Sync {
         if (isset($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
             foreach ($product_data['StockPerWarehouse'] as $warehouse_stock) {
                 $total_stock += isset($warehouse_stock['FreeStock']) ? $warehouse_stock['FreeStock'] : 0;
+                $total_stock += isset($warehouse_stock['ShelfStock']) ? $warehouse_stock['ShelfStock'] : 0;
+                $total_stock += isset($warehouse_stock['EconomicalStock']) ? $warehouse_stock['EconomicalStock'] : 0;
             }
         }
         $product->set_stock_quantity($total_stock);

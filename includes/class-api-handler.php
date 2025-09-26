@@ -179,7 +179,7 @@ class API_Handler {
      */
     public function get_products($params = array()) {
         $this->logger->info('Fetching products from Powerall API (export endpoint)');
-        $response = $this->get('products/export.JSON');
+        $response = $this->get('products/export.JSON?include=Stock');
 
         if (is_wp_error($response)) {
             return $response;
@@ -201,7 +201,7 @@ class API_Handler {
      * @return array|WP_Error Stock data or error
      */
     public function get_product_stock($product_id) {
-        $response = $this->get("products/{$product_id}");
+        $response = $this->get("products/{$product_id}?include=Stock");
         
         if (is_wp_error($response)) {
             return $response;
@@ -213,12 +213,10 @@ class API_Handler {
 
         $stock_data = array();
         foreach ($response['Data'][0]['StockPerWarehouse'] as $stock) {
-            $warehouse = $stock['Warehouse'][0] ?? array();
             $stock_data[] = array(
-                'warehouse' => $warehouse['Description'] ?? '',
-                'warehouseCode' => $warehouse['WarehouseCode'] ?? '',
-                'freeStock' => $stock['FreeStock'] ?? 0,
-                'shelfStock' => $stock['ShelfStock'] ?? 0
+                'EconomicalStock' => $stock['EconomicalStock'] ?? 0,
+                'FreeStock' => $stock['FreeStock'] ?? 0,
+                'ShelfStock' => $stock['ShelfStock'] ?? 0
             );
         }
 
@@ -461,17 +459,6 @@ class API_Handler {
         ));
         
         return $this->post($endpoint, $sales_order);
-    }
-
-    /**
-     * Update product stock in Powerall API
-     *
-     * @param string $product_id Product ID
-     * @param int $quantity New stock quantity
-     * @return array|WP_Error Response data or error
-     */
-    public function update_product_stock($product_id, $quantity) {
-        return $this->put("products/{$product_id}/stock", array('quantity' => $quantity));
     }
 
         /**
