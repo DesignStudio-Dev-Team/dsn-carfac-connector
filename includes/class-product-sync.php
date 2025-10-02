@@ -107,7 +107,14 @@ class Product_Sync {
         $old_stock = $product->get_stock_quantity();
 
         $new_price = $product_data['SalesPrice'] ?? $product_data['SalesPrice'] ?? '';
-        $product->set_sale_price($new_price);
+
+        //check if Old_price is not equal to salesPrice
+        if ($old_price != $new_price) {
+            $product->set_sale_price($new_price);
+        } else {
+            $this->logger->info('No changes for product SKU: ' . $sku);
+            $product->set_sale_price('');
+        }
         $product->set_manage_stock(true);
         // Calculate total stock from StockPerWarehouse array
         $total_stock = 0;

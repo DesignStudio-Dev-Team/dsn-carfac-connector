@@ -141,7 +141,7 @@ class API_Handler {
         $data = json_decode($body, true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
-            $error = new \WP_Error('invalid_response', __('Invalid response from Powerall API.', 'dsn-woo-powerall'));
+            // $error = new \WP_Error('invalid_response', __('Invalid response from Powerall API.', 'dsn-woo-powerall'));
             $this->logger->error(sprintf('Invalid JSON response: %s', $body));
             return $error;
         }
@@ -157,7 +157,7 @@ class API_Handler {
 
         if ($response_code < 200 || $response_code >= 300) {
             $error_message = isset($data['message']) ? $data['message'] : __('Unknown error occurred.', 'dsn-woo-powerall');
-            $error = new \WP_Error('api_error', $error_message, array('status' => $response_code));
+            // $error = new \WP_Error('api_error', $error_message, array('status' => $response_code));
             $this->logger->error(sprintf(
                 'API error (HTTP %d): %s. Response body: %s',
                 $response_code,
@@ -208,7 +208,7 @@ class API_Handler {
         }
 
         if (!isset($response['Data'][0]['StockPerWarehouse'])) {
-            return new \WP_Error('invalid_response', 'No stock information available');
+            // return new \WP_Error('invalid_response', 'No stock information available');
         }
 
         $stock_data = array();
