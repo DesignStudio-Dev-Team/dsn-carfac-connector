@@ -108,6 +108,15 @@ class Product_Sync {
 
         $new_price = $product_data['SalesPrice'] ?? $product_data['SalesPrice'] ?? '';
 
+        //check if price comes with VAT or not using the  SalesPriceIsIncVat boolean
+        $incVat = $product_data['SalesPriceIsIncVat'] ?? $product_data['SalesPriceIsIncVat'] ?? false;
+
+        //if is false then we add a 21% VAT to the price
+        if (!$incVat) {
+            $new_price = $new_price * 1.21;
+        }
+
+
         //check if Old_price is not equal to salesPrice
         if ($old_price != $new_price) {
             $product->set_sale_price($new_price);

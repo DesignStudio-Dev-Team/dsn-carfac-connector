@@ -435,7 +435,7 @@ class API_Handler {
                     'ProductCode' => $item['sku'],
                     'QuantityOrdered' => intval($item['quantity']),
                     'GrossPrice' => floatval($item['price']),
-                    'PriceIncVat' => false
+                    'PriceIncVat' => true
                 );
             }, $order_data['items']),
             'DeliveryAddress' => isset($order_data['shipping_address']) ? array(
