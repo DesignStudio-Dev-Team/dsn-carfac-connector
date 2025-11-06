@@ -126,6 +126,32 @@ class Admin_Settings {
             }
         }
 
+        // Handle cleanup execution
+        if (isset($_POST['dsn_woo_powerall_cleanup']) && check_admin_referer('dsn_woo_powerall_cleanup_sale_prices', 'dsn_woo_powerall_cleanup_nonce')) {
+            require_once __DIR__ . '/class-product-sync.php';
+            require_once __DIR__ . '/class-api-handler.php';
+            $api_handler = new API_Handler();
+            $product_sync = new Product_Sync($api_handler);
+            $result = $product_sync->cleanup_remove_equal_sale_prices(100);
+            if (is_array($result)) {
+                $this->logger->info('Cleanup completed. Processed: ' . $result['processed'] . ' Updated: ' . $result['updated']);
+                add_settings_error(
+                    'dsn_woo_powerall_messages',
+                    'dsn_woo_powerall_message',
+                    sprintf(__('Cleanup completed. Processed: %d Updated: %d', 'dsn-woo-powerall'), $result['processed'], $result['updated']),
+                    'updated'
+                );
+            } else {
+                $this->logger->error('Cleanup failed or returned unexpected result.');
+                add_settings_error(
+                    'dsn_woo_powerall_messages',
+                    'dsn_woo_powerall_message',
+                    __('Cleanup failed. Check logs for details.', 'dsn-woo-powerall'),
+                    'error'
+                );
+            }
+        }
+
         // Handle test execution
         if (isset($_POST['run_tests']) && check_admin_referer('dsn_woo_powerall_run_tests')) {
             $test = new Test();
@@ -169,6 +195,13 @@ class Admin_Settings {
             </form>
 
             <hr>
+
+            <h2><?php _e('Cleanup', 'dsn-woo-powerall'); ?></h2>
+            <p><?php _e('Remove sale price when it is equal to the regular price across all products.', 'dsn-woo-powerall'); ?></p>
+            <form method="post" action="">
+                <?php wp_nonce_field('dsn_woo_powerall_cleanup_sale_prices', 'dsn_woo_powerall_cleanup_nonce'); ?>
+                <input type="submit" name="dsn_woo_powerall_cleanup" class="button button-secondary" value="<?php esc_attr_e('Cleanup sale prices', 'dsn-woo-powerall'); ?>">
+            </form>
 
             <h2><?php _e('Log Viewer', 'dsn-woo-powerall'); ?></h2>
             <p><?php _e('View the latest API requests and responses.', 'dsn-woo-powerall'); ?></p>
