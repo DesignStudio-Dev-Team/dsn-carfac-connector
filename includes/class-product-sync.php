@@ -127,7 +127,6 @@ class Product_Sync {
        
 
         if ($console_id) {
-            // Build the expected path (as per your note)
             $console_path = trailingslashit( WP_CONTENT_DIR ) . 'plugins/syndified/website-content/json/Product/' . $console_id . '.json';
             if (file_exists($console_path) && is_readable($console_path)) {
                 $this->logger->info('Found console JSON for product SKU ' . $sku . ': ' . $console_path);
@@ -171,11 +170,21 @@ class Product_Sync {
 
         // Calculate total stock from StockPerWarehouse array
         $total_stock = 0;
+        // if (isset($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
+        //     foreach ($product_data['StockPerWarehouse'] as $warehouse_stock) {
+        //         $total_stock += isset($warehouse_stock['FreeStock']) ? $warehouse_stock['FreeStock'] : 0;
+        //     }
+        // }
+
+        //just get the 1st stockperwarehouse and get the freestock
         if (isset($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
-            foreach ($product_data['StockPerWarehouse'] as $warehouse_stock) {
-                $total_stock += isset($warehouse_stock['FreeStock']) ? $warehouse_stock['FreeStock'] : 0;
+            if(isset($product_data['StockPerWarehouse'][0])) {
+                if(isset($product_data['StockPerWarehouse'][0]['FreeStock'])) {
+                    $total_stock = $product_data['StockPerWarehouse'][0]['FreeStock'];
+                }        
             }
         }
+
         $product->set_stock_quantity($total_stock);
 
 

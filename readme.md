@@ -102,11 +102,16 @@ For support, please:
 2. Review the plugin's error logs
 3. Contact support with specific error messages
 
+## Update Plugin
+This plugin is updated via Github
+
+
 ## License
 
 This plugin is licensed under the GPL v2 or later.
 
 ## Disclaimer 
+
 Items with * at the end are coming soon or work in progress
 
 ## Credits

@@ -146,6 +146,8 @@ class DSN_Woo_Powerall {
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-admin-settings.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-product-sync.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-order-sync.php';
+        // GitHub updater (optional) - enables updates from GitHub releases/tags
+        require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-github-updater.php';
         // Load optional WP-CLI commands
         if (defined('WP_CLI') && WP_CLI) {
             require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/cli-commands.php';
@@ -161,6 +163,15 @@ class DSN_Woo_Powerall {
         $this->admin_settings = new Admin_Settings();
         $this->product_sync = new Product_Sync($this->api_handler);
         $this->order_sync = new Order_Sync($this->api_handler);
+        // Initialize GitHub updater to enable plugin updates from GitHub releases
+        try {
+            // Repo: DesignStudio-Dev-Team/dsn-woo-powerall-connector
+            new \DSNWooPowerall\GitHub_Updater('DesignStudio-Dev-Team', 'dsn-woo-powerall-connector', DSN_WOO_POWERALL_PLUGIN_FILE);
+        } catch (\Throwable $e) {
+            if (isset($this->logger)) {
+                $this->logger->warning('GitHub Updater initialization failed: ' . $e->getMessage());
+            }
+        }
     }
 
     /**
