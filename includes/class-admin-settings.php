@@ -39,6 +39,7 @@ class Admin_Settings {
         register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_tenant_name');
         register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_token');
         register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_sync_frequency');
+        register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_use_sale_price');
 
         add_settings_section(
             'dsn_woo_powerall_main_section',
@@ -67,6 +68,14 @@ class Admin_Settings {
             'dsn_woo_powerall_sync_frequency',
             __('Sync Frequency', 'dsn-woo-powerall'),
             array($this, 'render_sync_frequency_field'),
+            'dsn-woo-powerall',
+            'dsn_woo_powerall_main_section'
+        );
+
+        add_settings_field(
+            'dsn_woo_powerall_use_sale_price',
+            __('Use Powerall Sale Price', 'dsn-woo-powerall'),
+            array($this, 'render_use_sale_price_field'),
             'dsn-woo-powerall',
             'dsn_woo_powerall_main_section'
         );
@@ -281,6 +290,23 @@ class Admin_Settings {
         </select>
         <p class="description">
             <?php _e('How often should the plugin sync products with Powerall CRM?', 'dsn-woo-powerall'); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render use sale price field
+     */
+    public function render_use_sale_price_field() {
+        $use_sale_price = get_option('dsn_woo_powerall_use_sale_price', '1'); // Default to true (1)
+        ?>
+        <input type="checkbox" 
+               id="dsn_woo_powerall_use_sale_price" 
+               name="dsn_woo_powerall_use_sale_price" 
+               value="1" 
+               <?php checked(1, $use_sale_price, true); ?>>
+        <p class="description">
+            <?php _e('Enable to use the sale price from Powerall CRM.', 'dsn-woo-powerall'); ?>
         </p>
         <?php
     }

@@ -95,6 +95,9 @@ class Product_Sync {
             return false;
         }
 
+
+       
+        
         // Update existing product
         $product = wc_get_product($product_id);
         if (!$product) {
@@ -102,24 +105,30 @@ class Product_Sync {
             return new \WP_Error('invalid_product', __('Product not found in WooCommerce.', 'dsn-woo-powerall'));
         }
 
-        // Update only price and stock
-        $old_price = $product->get_sale_price();
+
         $old_stock = $product->get_stock_quantity();
 
-        $new_price = $product_data['SalesPrice'] ?? $product_data['SalesPrice'] ?? '';
 
-        //check if price comes with VAT or not using the  SalesPriceIsIncVat boolean
-        //if is false then we add a 21% VAT to the price
-        if ($product_data['SalesPriceIsIncVat'] == false) {
-            $new_price = $new_price * 1.21;
+         //Need a new if statement here to check if the site wants the new price from Powerall or not use the normal sale price from the website
+        $use_powerall_price = get_option('dsn_woo_powerall_use_sale_price', '1');
+        if (!$use_powerall_price) {
+            // Update only price and stock
+            $old_price = $product->get_sale_price();
+            
+            $new_price = $product_data['SalesPrice'] ?? $product_data['SalesPrice'] ?? '';
 
-            // Make the new price be to 2 decimals safely (coerce to float first)
-            if ($new_price !== '' && $new_price !== null) {
-                $new_price = round(floatval($new_price), 2);
+            //check if price comes with VAT or not using the  SalesPriceIsIncVat boolean
+            //if is false then we add a 21% VAT to the price
+            if ($product_data['SalesPriceIsIncVat'] == false) {
+                $new_price = $new_price * 1.21;
+
+                // Make the new price be to 2 decimals safely (coerce to float first)
+                if ($new_price !== '' && $new_price !== null) {
+                    $new_price = round(floatval($new_price), 2);
+                }
             }
-        }
-
-
+       
+    
         // Make sure this product doesn't have promotional pricing coming from the syndified console
         // If a console JSON exists for this product and contains an 'spp' promotional price, skip setting the sale price.
         $has_console_promo = false;
@@ -165,6 +174,8 @@ class Product_Sync {
                 $product->set_sale_price($new_price);
             }
         }
+
+        } 
 
         $product->set_manage_stock(true);
 
