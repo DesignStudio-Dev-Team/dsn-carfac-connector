@@ -101,10 +101,14 @@ class Admin_Settings {
         // Handle log clearing
         if (isset($_POST['clear_log']) && check_admin_referer('dsn_woo_powerall_clear_log')) {
             $this->logger->clear_log();
+            
+            // Clear GitHub update cache to force a re-check
+            delete_transient('dsn_github_latest_release_DesignStudio-Dev-Team_dsn-woo-powerall-connector');
+
             add_settings_error(
                 'dsn_woo_powerall_messages',
                 'dsn_woo_powerall_message',
-                __('Log cleared successfully.', 'dsn-woo-powerall'),
+                __('Log cleared and update cache reset successfully.', 'dsn-woo-powerall'),
                 'updated'
             );
         }

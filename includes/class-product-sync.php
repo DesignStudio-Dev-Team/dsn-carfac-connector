@@ -111,7 +111,7 @@ class Product_Sync {
 
          //Need a new if statement here to check if the site wants the new price from Powerall or not use the normal sale price from the website
         $use_powerall_price = get_option('dsn_woo_powerall_use_sale_price', '1');
-        if (!$use_powerall_price) {
+        if ($use_powerall_price) {
             // Update only price and stock
             $old_price = $product->get_sale_price();
             

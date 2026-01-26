@@ -10,15 +10,18 @@ class GitHub_Updater {
     private $repo;
     private $plugin_file;
     private $token;
+    private $logger;
 
-    public function __construct($owner, $repo, $plugin_file, $token = '') {
+    public function __construct($owner, $repo, $plugin_file, $token = '', $logger = null) {
         $this->owner = $owner;
         $this->repo = $repo;
         $this->plugin_file = $plugin_file;
         $this->token = $token;
+        $this->logger = $logger;
 
         add_filter('pre_set_site_transient_update_plugins', array($this, 'check_for_update'));
         add_filter('plugins_api', array($this, 'plugin_api_call'), 10, 3);
+        add_filter('upgrader_source_selection', array($this, 'upgrader_source_selection'), 10, 4);
     }
 
     private function api_request($url) {
@@ -33,13 +36,23 @@ class GitHub_Updater {
             $args['headers']['Authorization'] = 'token ' . $this->token;
         }
 
+        if ($this->logger) {
+            $this->logger->info('GitHub Updater: Requesting URL ' . $url);
+        }
+
         $response = wp_remote_get($url, $args);
         if (is_wp_error($response)) {
+            if ($this->logger) {
+                $this->logger->error('GitHub Updater: Connection Error - ' . $response->get_error_message());
+            }
             return $response;
         }
 
         $code = wp_remote_retrieve_response_code($response);
         if ($code !== 200) {
+            if ($this->logger) {
+                $this->logger->error('GitHub Updater: API Error HTTP ' . $code);
+            }
             return new \WP_Error('github_api_error', 'GitHub API returned HTTP ' . $code);
         }
 
@@ -56,6 +69,9 @@ class GitHub_Updater {
         $transient_key = 'dsn_github_latest_release_' . $this->owner . '_' . $this->repo;
         $cached = get_transient($transient_key);
         if ($cached) {
+            if ($this->logger) {
+                $this->logger->info('GitHub Updater: Using cached release info.');
+            }
             return $cached;
         }
 
@@ -75,6 +91,10 @@ class GitHub_Updater {
             return $transient;
         }
 
+        if ($this->logger) {
+            $this->logger->info('GitHub Updater: Checking for updates...');
+        }
+
         $plugin_slug = plugin_basename($this->plugin_file);
 
         $release = $this->get_latest_release();
@@ -84,6 +104,9 @@ class GitHub_Updater {
 
         $tag = isset($release['tag_name']) ? ltrim($release['tag_name'], 'v') : null;
         if (!$tag) {
+            if ($this->logger) {
+                $this->logger->warning('GitHub Updater: No tag found in release.');
+            }
             return $transient;
         }
 
@@ -93,6 +116,9 @@ class GitHub_Updater {
         }
 
         if (version_compare($tag, $current, '>')) {
+            if ($this->logger) {
+                $this->logger->info('GitHub Updater: New version found: ' . $tag . ' (Current: ' . $current . ')');
+            }
             $package = isset($release['zipball_url']) ? $release['zipball_url'] : sprintf('https://github.com/%s/%s/archive/refs/tags/%s.zip', $this->owner, $this->repo, $release['tag_name']);
 
             $obj = new \stdClass();
@@ -102,6 +128,10 @@ class GitHub_Updater {
             $obj->package = $package;
 
             $transient->response[$plugin_slug] = $obj;
+        } else {
+             if ($this->logger) {
+                $this->logger->info('GitHub Updater: No new version. Tag: ' . $tag . ' <= Current: ' . $current);
+            }
         }
 
         return $transient;
@@ -133,6 +163,42 @@ class GitHub_Updater {
         $data->download_link = isset($release['zipball_url']) ? $release['zipball_url'] : '';
 
         return $data;
+    }
+
+    public function upgrader_source_selection($source, $remote_source, $upgrader, $hook_extra = null) {
+        global $wp_filesystem;
+
+        if ($this->logger) {
+            $this->logger->info('GitHub Updater: Processing source selection. Source: ' . $source);
+        }
+
+        $plugin_file_name = basename($this->plugin_file);
+
+        // Check if the source directory contains our plugin file
+        if ($wp_filesystem->exists($source . $plugin_file_name)) {
+            $new_source = trailingslashit(dirname($source)) . 'dsn-woo-powerall-connector/';
+            
+            if ($this->logger) {
+                $this->logger->info('GitHub Updater: Found plugin file. Attempting rename to: ' . $new_source);
+            }
+
+            if ($source !== $new_source) {
+                $result = $wp_filesystem->move($source, $new_source);
+                if ($result) {
+                    if ($this->logger) {
+                        $this->logger->info('GitHub Updater: Rename successful.');
+                    }
+                    return $new_source;
+                } else {
+                    if ($this->logger) {
+                        $this->logger->error('GitHub Updater: Rename failed.');
+                    }
+                    return $source;
+                }
+            }
+        }
+
+        return $source;
     }
 }
 

@@ -207,18 +207,33 @@ class API_Handler {
             return $response;
         }
 
-        if (!isset($response['Data'][0]['StockPerWarehouse'])) {
-            // return new \WP_Error('invalid_response', 'No stock information available');
+        // Handle different response structures: Data can be an array or object
+        $product_data = null;
+        if (isset($response['Data'])) {
+            // Check if Data is an indexed array (Data[0]) or direct object (Data)
+            if (isset($response['Data'][0]['StockPerWarehouse'])) {
+                $product_data = $response['Data'][0];
+            } elseif (isset($response['Data']['StockPerWarehouse'])) {
+                $product_data = $response['Data'];
+            }
+        }
+
+        if (!$product_data || !isset($product_data['StockPerWarehouse'])) {
+            $this->logger->warning('No stock information available for product: ' . $product_id);
+            return array();
         }
 
         $stock_data = array();
-        foreach ($response['Data'][0]['StockPerWarehouse'] as $stock) {
+        foreach ($product_data['StockPerWarehouse'] as $stock) {
+            // Cast string values to float for proper numeric handling
             $stock_data[] = array(
-                'EconomicalStock' => $stock['EconomicalStock'] ?? 0,
-                'FreeStock' => $stock['FreeStock'] ?? 0,
-                'ShelfStock' => $stock['ShelfStock'] ?? 0
+                'EconomicalStock' => floatval($stock['EconomicalStock'] ?? 0),
+                'FreeStock' => floatval($stock['FreeStock'] ?? 0),
+                'ShelfStock' => floatval($stock['ShelfStock'] ?? 0)
             );
         }
+
+        $this->logger->info('Stock data for product ' . $product_id . ': ' . json_encode($stock_data));
 
         return $stock_data;
     }
@@ -316,6 +331,15 @@ class API_Handler {
      */
     public function create_relation($customer_data) {
         $this->logger->info('Creating new relation with data: ' . json_encode($customer_data));
+
+        // Check if relation already exists
+        if (isset($customer_data['customer']['email'])) {
+            $existing_relation = $this->get_relation_by_email($customer_data['customer']['email']);
+            if ($existing_relation && !is_wp_error($existing_relation)) {
+                 $this->logger->info('Relation already exists (found in create_relation check): ' . $existing_relation['Id']);
+                 return $existing_relation;
+            }
+        }
 
         $relation_data = array(
             'Name1' => $customer_data['customer']['first_name'] . ' ' . $customer_data['customer']['last_name'],

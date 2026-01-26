@@ -166,7 +166,7 @@ class DSN_Woo_Powerall {
         // Initialize GitHub updater to enable plugin updates from GitHub releases
         try {
             // Repo: DesignStudio-Dev-Team/dsn-woo-powerall-connector
-            new \DSNWooPowerall\GitHub_Updater('DesignStudio-Dev-Team', 'dsn-woo-powerall-connector', DSN_WOO_POWERALL_PLUGIN_FILE);
+            new \DSNWooPowerall\GitHub_Updater('DesignStudio-Dev-Team', 'dsn-woo-powerall-connector', DSN_WOO_POWERALL_PLUGIN_FILE, '', $this->logger);
         } catch (\Throwable $e) {
             if (isset($this->logger)) {
                 $this->logger->warning('GitHub Updater initialization failed: ' . $e->getMessage());
