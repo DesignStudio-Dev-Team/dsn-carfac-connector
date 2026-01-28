@@ -119,7 +119,20 @@ class GitHub_Updater {
             if ($this->logger) {
                 $this->logger->info('GitHub Updater: New version found: ' . $tag . ' (Current: ' . $current . ')');
             }
-            $package = isset($release['zipball_url']) ? $release['zipball_url'] : sprintf('https://github.com/%s/%s/archive/refs/tags/%s.zip', $this->owner, $this->repo, $release['tag_name']);
+            // Prioritize release assets (which have the correct folder structure) over source zipball
+            $package = '';
+            if (!empty($release['assets']) && is_array($release['assets'])) {
+                foreach ($release['assets'] as $asset) {
+                    if ($asset['content_type'] === 'application/zip' || substr($asset['name'], -4) === '.zip') {
+                        $package = $asset['browser_download_url'];
+                        break;
+                    }
+                }
+            }
+
+            if (empty($package)) {
+                $package = isset($release['zipball_url']) ? $release['zipball_url'] : sprintf('https://github.com/%s/%s/archive/refs/tags/%s.zip', $this->owner, $this->repo, $release['tag_name']);
+            }
 
             $obj = new \stdClass();
             $obj->slug = dirname($plugin_slug);
@@ -160,7 +173,22 @@ class GitHub_Updater {
         $data->sections = array(
             'description' => isset($release['body']) ? $release['body'] : '',
         );
-        $data->download_link = isset($release['zipball_url']) ? $release['zipball_url'] : '';
+        // Prioritize release assets
+        $download_link = '';
+        if (!empty($release['assets']) && is_array($release['assets'])) {
+            foreach ($release['assets'] as $asset) {
+                if ($asset['content_type'] === 'application/zip' || substr($asset['name'], -4) === '.zip') {
+                    $download_link = $asset['browser_download_url'];
+                    break;
+                }
+            }
+        }
+        
+        if (empty($download_link)) {
+            $download_link = isset($release['zipball_url']) ? $release['zipball_url'] : '';
+        }
+
+        $data->download_link = $download_link;
 
         return $data;
     }
