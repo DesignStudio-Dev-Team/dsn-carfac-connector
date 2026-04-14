@@ -162,6 +162,7 @@ class Order_Sync {
 
         return array(
             'external_id' => $order->get_id(),
+            'customer_id' => $order->get_customer_id(), // WP user ID (0 for guests)
             'customer' => $billing_address,
             'shipping' => $shipping_address,
             'items' => $items,

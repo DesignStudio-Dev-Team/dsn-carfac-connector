@@ -141,7 +141,7 @@ class API_Handler {
         $data = json_decode($body, true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
-            // $error = new \WP_Error('invalid_response', __('Invalid response from Powerall API.', 'dsn-woo-powerall'));
+            $error = new \WP_Error('invalid_response', __('Invalid response from Powerall API.', 'dsn-woo-powerall'));
             $this->logger->error(sprintf('Invalid JSON response: %s', $body));
             return $error;
         }
@@ -157,7 +157,7 @@ class API_Handler {
 
         if ($response_code < 200 || $response_code >= 300) {
             $error_message = isset($data['message']) ? $data['message'] : __('Unknown error occurred.', 'dsn-woo-powerall');
-            // $error = new \WP_Error('api_error', $error_message, array('status' => $response_code));
+            $error = new \WP_Error('api_error', $error_message, array('status' => $response_code));
             $this->logger->error(sprintf(
                 'API error (HTTP %d): %s. Response body: %s',
                 $response_code,
@@ -198,7 +198,7 @@ class API_Handler {
      * Get product stock from Powerall API
      *
      * @param string $product_id Product ID
-     * @return array|WP_Error Stock data or error
+     * @return array|WP_Error Stock data with 'quantity' key and 'warehouses' detail, or error
      */
     public function get_product_stock($product_id) {
         $response = $this->get("products/{$product_id}?include=Stock");
@@ -220,22 +220,24 @@ class API_Handler {
 
         if (!$product_data || !isset($product_data['StockPerWarehouse'])) {
             $this->logger->warning('No stock information available for product: ' . $product_id);
-            return array();
+            return array('quantity' => 0, 'warehouses' => array());
         }
 
-        $stock_data = array();
+        $stock_mode = Stock_Helper::get_selected_mode();
+        $warehouses = array();
+
         foreach ($product_data['StockPerWarehouse'] as $stock) {
-            // Cast string values to float for proper numeric handling
-            $stock_data[] = array(
-                'EconomicalStock' => floatval($stock['EconomicalStock'] ?? 0),
-                'FreeStock' => floatval($stock['FreeStock'] ?? 0),
-                'ShelfStock' => floatval($stock['ShelfStock'] ?? 0)
-            );
+            $warehouses[] = Stock_Helper::normalize_warehouse_stock($stock);
         }
 
-        $this->logger->info('Stock data for product ' . $product_id . ': ' . json_encode($stock_data));
+        $total_quantity = Stock_Helper::calculate_total_stock($warehouses, $stock_mode);
 
-        return $stock_data;
+        $this->logger->info('Stock data for product ' . $product_id . ' (mode: ' . $stock_mode . ', total: ' . $total_quantity . '): ' . json_encode($warehouses));
+
+        return array(
+            'quantity'   => $total_quantity,
+            'warehouses' => $warehouses,
+        );
     }
 
     /**
@@ -246,27 +248,34 @@ class API_Handler {
      */
     public function get_relation_by_email($email) {
         $this->logger->info('Searching for relation with email: ' . $email);
-        
-        // Get all relations
-        $response = $this->get('relations');
-        
-        // $this->logger->info('Get Relations repsonse: ' . var_dump($response));
-        
-        if (is_wp_error($response)) {
-            return $response;
-        }
 
-        if (empty($response['Data'])) {
-            return null;
-        }
+        $page      = 1;
+        $page_size = 250;
+        $needle    = strtolower(trim($email));
 
-        // Search for the relation with matching email
-        foreach ($response['Data'] as $relation) {
-            if (isset($relation['EmailAddress']) && strtolower($relation['EmailAddress']) === strtolower($email)) {
-                $this->logger->info('Found relation with code: ' . $relation['RelationCode']);
-                return $relation;
+        do {
+            $response = $this->get('relations', array('PageIndex' => $page, 'PageSize' => $page_size));
+
+            if (is_wp_error($response)) {
+                return $response;
             }
-        }
+
+            if (empty($response['Data']) || !is_array($response['Data'])) {
+                break;
+            }
+
+            foreach ($response['Data'] as $relation) {
+                if (isset($relation['EmailAddress']) && strtolower(trim($relation['EmailAddress'])) === $needle) {
+                    $this->logger->info('Found relation with code: ' . ($relation['RelationCode'] ?? 'N/A') . ' on page ' . $page);
+                    return $relation;
+                }
+            }
+
+            $fetched   = count($response['Data']);
+            $total     = isset($response['TotalCount']) ? (int) $response['TotalCount'] : 0;
+            $has_more  = $total > 0 ? ($page * $page_size) < $total : $fetched >= $page_size;
+            $page++;
+        } while ($has_more);
 
         $this->logger->info('No relation found with email: ' . $email);
         return null;
@@ -332,25 +341,30 @@ class API_Handler {
     public function create_relation($customer_data) {
         $this->logger->info('Creating new relation with data: ' . json_encode($customer_data));
 
-        // Check if relation already exists
-        if (isset($customer_data['customer']['email'])) {
-            $existing_relation = $this->get_relation_by_email($customer_data['customer']['email']);
-            if ($existing_relation && !is_wp_error($existing_relation)) {
-                 $this->logger->info('Relation already exists (found in create_relation check): ' . $existing_relation['Id']);
-                 return $existing_relation;
-            }
-        }
+        // Resolve address fields — support both flat billing_address and nested customer.address structures.
+        $address_line = $customer_data['billing_address']['address_1']
+            ?? $customer_data['customer']['address']['street']
+            ?? '';
+        $zip_code = $customer_data['billing_address']['postcode']
+            ?? $customer_data['customer']['address']['postcode']
+            ?? '';
+        $town = $customer_data['billing_address']['city']
+            ?? $customer_data['customer']['address']['city']
+            ?? '';
+        $phone = $customer_data['phone']
+            ?? $customer_data['customer']['phone']
+            ?? '';
 
         $relation_data = array(
-            'Name1' => $customer_data['customer']['first_name'] . ' ' . $customer_data['customer']['last_name'],
-            'EmailAddress' => $customer_data['customer']['email'],
-            'AddressLine' => $customer_data['billing_address']['address_1'] ?? '',
-            'ZipCode' => $customer_data['billing_address']['postcode'] ?? '',
-            'Town' => $customer_data['billing_address']['city'] ?? '',
+            'Name1'       => trim(($customer_data['customer']['first_name'] ?? '') . ' ' . ($customer_data['customer']['last_name'] ?? '')),
+            'EmailAddress' => $customer_data['customer']['email'] ?? '',
+            'AddressLine' => $address_line,
+            'ZipCode'     => $zip_code,
+            'Town'        => $town,
             'CountryCode' => 1, // Default to Netherlands
-            'Type' => 'Personal',
-            'Phone' => $customer_data['phone'] ?? '',
-            'PayVat' => true
+            'Type'        => 'Personal',
+            'Phone'       => $phone,
+            'PayVat'      => true,
         );
 
 
@@ -384,43 +398,56 @@ class API_Handler {
     }
 
     /**
-     * Get or create relation
+     * Get or create relation, with WP user meta caching to prevent duplicates.
      *
      * @param array $customer_data Customer data
      * @return array|WP_Error Relation data or error
      */
     public function get_or_create_relation($customer_data) {
-        // First try to find existing relation
-        $relation = $this->get_relation_by_email($customer_data['customer']['email']);
-        
+        $email      = strtolower(trim($customer_data['customer']['email'] ?? ''));
+        $wp_user_id = !empty($customer_data['customer_id']) ? (int) $customer_data['customer_id'] : 0;
+
+        // 1. Check WP user meta cache first — avoids API round-trip for returning customers.
+        if ($wp_user_id > 0) {
+            $cached_relation_id = get_user_meta($wp_user_id, '_powerall_relation_id', true);
+            if ($cached_relation_id) {
+                $this->logger->info('Using cached Powerall relation ID ' . $cached_relation_id . ' for WP user ' . $wp_user_id);
+                return array('Id' => $cached_relation_id);
+            }
+        }
+
+        // 2. Search by email across all pages.
+        $relation = $this->get_relation_by_email($email);
+
         if (is_wp_error($relation)) {
             return $relation;
         }
 
-        // If relation exists, return it
-        if ($relation) {
-            $this->logger->info('Found existing relation with ID: ' . $relation['Id']);
-            return $relation;
-        } else {
+        // 3. Create if not found.
+        if (!$relation) {
+            $this->logger->info('No existing relation found for ' . $email . ', creating new one');
+            $relation = $this->create_relation($customer_data);
 
-            // If not found, create new relation
-            $this->logger->info('No existing relation found, creating new one');
-            $new_relation = $this->create_relation($customer_data);
-            
-            if (is_wp_error($new_relation)) {
-                return $new_relation;
+            if (is_wp_error($relation)) {
+                return $relation;
             }
 
-            // Verify we have a relation ID
-            if (empty($new_relation['Id'])) {
-                $error = new \WP_Error('invalid_response', 'No relation ID in new relation');
-                $this->logger->error('Failed to get relation ID: ' . $error->get_error_message());
+            if (empty($relation['Id'])) {
+                $error = new \WP_Error('invalid_response', 'No relation ID returned after create');
+                $this->logger->error($error->get_error_message());
                 return $error;
             }
-
-            $this->logger->info('Successfully created new relation with ID: ' . $new_relation['Id']);
-            return $new_relation;
+        } else {
+            $this->logger->info('Found existing relation with ID: ' . $relation['Id']);
         }
+
+        // 4. Cache relation ID in WP user meta so future orders skip the search.
+        if ($wp_user_id > 0 && !empty($relation['Id'])) {
+            update_user_meta($wp_user_id, '_powerall_relation_id', $relation['Id']);
+            $this->logger->info('Cached Powerall relation ID ' . $relation['Id'] . ' for WP user ' . $wp_user_id);
+        }
+
+        return $relation;
     }
 
     /**
@@ -494,4 +521,4 @@ class API_Handler {
         return get_post_meta($product_id, '_global_unique_id', true);
     }
 
-} 
+}

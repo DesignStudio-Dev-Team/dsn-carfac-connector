@@ -46,38 +46,71 @@ class DSN_Woo_Powerall {
 
     /**
      * Initialize the plugin.
+     *
+     * @return void
      */
     public function init() {
-        // Load dependencies
         $this->load_dependencies();
-
-        // Initialize components
         $this->init_components();
-
-        // Register hooks
         $this->register_hooks();
     }
 
     /**
-     * Enqueue admin scripts for cleanup UI
+     * Enqueue admin scripts.
+     *
+     * @param string $hook
+     * @return void
      */
     public function enqueue_admin_scripts($hook) {
-        // Only load on our plugin admin page
         if ($hook !== 'toplevel_page_dsn-woo-powerall') {
             return;
         }
-        wp_enqueue_script('dsn-woo-cleanup', plugins_url('../assets/js/cleanup.js', __FILE__), array('jquery'), false, true);
+
+        wp_enqueue_script(
+            'dsn-woo-cleanup',
+            plugins_url('../assets/js/cleanup.js', __FILE__),
+            array('jquery'),
+            DSN_WOO_POWERALL_VERSION,
+            true
+        );
         wp_localize_script('dsn-woo-cleanup', 'DSNWooPowerall', array(
             'ajax_url' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('dsn_woo_powerall_cleanup_nonce'),
         ));
+
+        $view = isset($_GET['view']) ? sanitize_key(wp_unslash($_GET['view'])) : '';
+        if ($view !== 'sync-progress') {
+            return;
+        }
+
+        wp_enqueue_script(
+            'dsn-woo-sync-progress',
+            plugins_url('../assets/js/sync-progress.js', __FILE__),
+            array('jquery'),
+            DSN_WOO_POWERALL_VERSION,
+            true
+        );
+        wp_localize_script('dsn-woo-sync-progress', 'DSNWooPowerallSync', array(
+            'ajax_url' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('dsn_woo_powerall_sync_progress'),
+            'auto_start' => isset($_GET['start']),
+            'progress_url' => add_query_arg(
+                array(
+                    'page' => 'dsn-woo-powerall',
+                    'view' => 'sync-progress',
+                ),
+                admin_url('admin.php')
+            ),
+            'state' => $this->product_sync->get_manual_sync_state(),
+        ));
     }
 
     /**
-     * AJAX handler for cleanup
+     * AJAX handler for cleanup.
+     *
+     * @return void
      */
     public function ajax_cleanup_sale_prices() {
-        // Log incoming AJAX request for debugging
         $this->logger->info('AJAX cleanup request received: ' . print_r(array('post' => $_POST, 'user' => get_current_user_id()), true));
 
         if (!current_user_can('manage_options') || !check_ajax_referer('dsn_woo_powerall_cleanup_nonce', 'nonce', false)) {
@@ -88,7 +121,6 @@ class DSN_Woo_Powerall {
         $batch = isset($_POST['batch']) ? intval($_POST['batch']) : 100;
         $page = isset($_POST['page']) ? intval($_POST['page']) : 1;
 
-        // Setup temporary error handler to catch warnings/notices as exceptions for logging
         $prev_error_handler = set_error_handler(function($severity, $message, $file, $line) {
             throw new \ErrorException($message, 0, $severity, $file, $line);
         });
@@ -105,7 +137,6 @@ class DSN_Woo_Powerall {
                 throw new \Exception('cleanup_failed');
             }
 
-            // Estimate total pages by querying a small WP_Query with no_found_rows=false for total
             $count_query = new \WP_Query(array(
                 'post_type' => array('product', 'product_variation'),
                 'posts_per_page' => 1,
@@ -115,7 +146,6 @@ class DSN_Woo_Powerall {
             $total_posts = isset($count_query->found_posts) ? $count_query->found_posts : 0;
             $total_pages = $batch > 0 ? max(1, ceil($total_posts / $batch)) : 1;
 
-            // Restore previous error handler
             if ($prev_error_handler !== null) {
                 set_error_handler($prev_error_handler);
             }
@@ -126,9 +156,7 @@ class DSN_Woo_Powerall {
                 'updated' => $page_result['updated'],
                 'total_pages' => $total_pages,
             ));
-
         } catch (\Throwable $e) {
-            // Restore previous error handler
             if ($prev_error_handler !== null) {
                 set_error_handler($prev_error_handler);
             }
@@ -138,7 +166,44 @@ class DSN_Woo_Powerall {
     }
 
     /**
+     * AJAX handler to start a manual sync run.
+     *
+     * @return void
+     */
+    public function ajax_start_manual_sync() {
+        $this->authorize_sync_ajax();
+
+        $result = $this->product_sync->start_manual_sync_run();
+        if (is_wp_error($result)) {
+            $this->logger->error('Manual sync start failed: ' . $result->get_error_message());
+            wp_send_json_error(array('message' => $result->get_error_message()), 500);
+        }
+
+        wp_send_json_success($result);
+    }
+
+    /**
+     * AJAX handler to process a manual sync batch.
+     *
+     * @return void
+     */
+    public function ajax_process_manual_sync_batch() {
+        $this->authorize_sync_ajax();
+
+        $run_id = isset($_POST['run_id']) ? sanitize_text_field(wp_unslash($_POST['run_id'])) : '';
+        $result = $this->product_sync->process_manual_sync_batch($run_id);
+        if (is_wp_error($result)) {
+            $this->logger->error('Manual sync batch failed: ' . $result->get_error_message());
+            wp_send_json_error(array('message' => $result->get_error_message()), 500);
+        }
+
+        wp_send_json_success($result);
+    }
+
+    /**
      * Load plugin dependencies.
+     *
+     * @return void
      */
     private function load_dependencies() {
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-logger.php';
@@ -146,9 +211,8 @@ class DSN_Woo_Powerall {
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-admin-settings.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-product-sync.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-order-sync.php';
-        // GitHub updater (optional) - enables updates from GitHub releases/tags
+        require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-stock-display.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-github-updater.php';
-        // Load optional WP-CLI commands
         if (defined('WP_CLI') && WP_CLI) {
             require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/cli-commands.php';
         }
@@ -156,6 +220,8 @@ class DSN_Woo_Powerall {
 
     /**
      * Initialize plugin components.
+     *
+     * @return void
      */
     private function init_components() {
         $this->api_handler = new API_Handler();
@@ -163,9 +229,9 @@ class DSN_Woo_Powerall {
         $this->admin_settings = new Admin_Settings();
         $this->product_sync = new Product_Sync($this->api_handler);
         $this->order_sync = new Order_Sync($this->api_handler);
-        // Initialize GitHub updater to enable plugin updates from GitHub releases
+        new Stock_Display();
+
         try {
-            // Repo: DesignStudio-Dev-Team/dsn-woo-powerall-connector
             new \DSNWooPowerall\GitHub_Updater('DesignStudio-Dev-Team', 'dsn-woo-powerall-connector', DSN_WOO_POWERALL_PLUGIN_FILE, '', $this->logger);
         } catch (\Throwable $e) {
             if (isset($this->logger)) {
@@ -176,59 +242,50 @@ class DSN_Woo_Powerall {
 
     /**
      * Register WordPress hooks.
+     *
+     * @return void
      */
     private function register_hooks() {
-        // Schedule daily sync for prices and stock
         if (!wp_next_scheduled('dsn_woo_powerall_daily_sync')) {
             wp_schedule_event(time(), 'daily', 'dsn_woo_powerall_daily_sync');
         }
 
-        // Schedule weekly log clear
         if (!wp_next_scheduled('dsn_woo_powerall_weekly_clear_logs')) {
             wp_schedule_event(time(), 'weekly', 'dsn_woo_powerall_weekly_clear_logs');
         }
 
-        // Add sync action hook for products
         add_action('dsn_woo_powerall_daily_sync', array($this->product_sync, 'sync_products'));
-        // Add weekly log clear action
         add_action('dsn_woo_powerall_weekly_clear_logs', array($this, 'clear_all_logs'));
-    
-    
-         // Add order hooks - only from WooCommerce to Powerall
+
         add_action('woocommerce_checkout_order_processed', array($this->order_sync, 'handle_new_order'), 10, 1);
         add_action('woocommerce_order_status_changed', array($this->order_sync, 'handle_order_status_change'), 10, 3);
 
-        // Add stock check before purchase
-        // add_action('woocommerce_check_cart_items', array($this, 'check_cart_stock'));
-        // add_action('woocommerce_before_checkout_process', array($this, 'check_cart_stock'));
-
-        // Add admin menu
         add_action('admin_menu', array($this->admin_settings, 'add_admin_menu'));
-
-    // Register AJAX handler for cleanup
-    add_action('wp_ajax_dsn_woo_powerall_cleanup', array($this, 'ajax_cleanup_sale_prices'));
-    // Enqueue admin scripts
-    add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
-
+        add_action('wp_ajax_dsn_woo_powerall_cleanup', array($this, 'ajax_cleanup_sale_prices'));
+        add_action('wp_ajax_dsn_woo_powerall_start_sync', array($this, 'ajax_start_manual_sync'));
+        add_action('wp_ajax_dsn_woo_powerall_process_sync_batch', array($this, 'ajax_process_manual_sync_batch'));
+        add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
     }
-  
+
     /**
-     * Check stock for all items in cart
+     * Check stock for all items in cart.
+     *
+     * @return void
      */
     public function check_cart_stock() {
         if (is_admin()) {
             return;
         }
 
-       foreach (WC()->cart->get_cart() as $cart_item) {
+        foreach (WC()->cart->get_cart() as $cart_item) {
             $product_id = $cart_item['product_id'];
-       $quantity = $cart_item['quantity'];
+            $quantity = $cart_item['quantity'];
 
             $result = $this->product_sync->check_stock_before_purchase($product_id, $quantity);
             if (is_wp_error($result)) {
-               wc_add_notice($result->get_error_message(), 'error');
-            return;
-          }
+                wc_add_notice($result->get_error_message(), 'error');
+                return;
+            }
         }
     }
 
@@ -245,16 +302,28 @@ class DSN_Woo_Powerall {
     }
 
     /**
-     * Clear all plugin logs (weekly cron)
+     * Clear all plugin logs (weekly cron).
+     *
+     * @return void
      */
     public function clear_all_logs() {
-        // Clear main logger log
         $logger = new Logger();
         $logger->clear_log();
-        // Optionally clear other logs (e.g., product_changes_log.txt)
+
         $product_log = dirname(__FILE__) . '/../product_changes_log.txt';
         if (file_exists($product_log)) {
             file_put_contents($product_log, '');
+        }
+    }
+
+    /**
+     * Verify that the current AJAX request can manage manual syncs.
+     *
+     * @return void
+     */
+    private function authorize_sync_ajax() {
+        if (!current_user_can('manage_options') || !check_ajax_referer('dsn_woo_powerall_sync_progress', 'nonce', false)) {
+            wp_send_json_error(array('message' => __('Unauthorized request.', 'dsn-woo-powerall')), 403);
         }
     }
 }

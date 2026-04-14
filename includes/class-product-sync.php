@@ -2,12 +2,18 @@
 namespace DSNWooPowerall;
 
 class Product_Sync {
+    public const MANUAL_SYNC_STATE_OPTION = 'dsn_woo_powerall_manual_sync_state';
+    public const DEFAULT_BATCH_SIZE = 25;
+    public const DEFAULT_BATCH_DELAY = 1;
+    private const MAX_STORED_ERRORS = 5;
+
     /**
      * Logger instance
      *
      * @var Logger
      */
     private $logger;
+
     /**
      * API handler instance
      *
@@ -26,228 +32,430 @@ class Product_Sync {
     }
 
     /**
-     * Sync products from Powerall CRM to WooCommerce
+     * Get the configured batch size for sync requests.
+     *
+     * @return int
+     */
+    public static function get_batch_size() {
+        $batch_size = absint(get_option('dsn_woo_powerall_sync_batch_size', self::DEFAULT_BATCH_SIZE));
+
+        return min(200, max(1, $batch_size));
+    }
+
+    /**
+     * Get the configured delay between sync batches in seconds.
+     *
+     * @return int
+     */
+    public static function get_batch_delay_seconds() {
+        $delay_seconds = absint(get_option('dsn_woo_powerall_sync_batch_delay', self::DEFAULT_BATCH_DELAY));
+
+        return min(30, max(0, $delay_seconds));
+    }
+
+    /**
+     * Sync products from Powerall CRM to WooCommerce.
      *
      * @return bool|WP_Error True on success, WP_Error on failure
      */
     public function sync_products() {
         $this->logger->info('Starting product sync from Powerall CRM');
-        // Get products from Powerall CRM
-        $products = $this->api_handler->get_products();
-        
-        if (is_wp_error($products)) {
-            $this->logger->error('Failed to fetch products: ' . $products->get_error_message());
-            return $products;
+
+        $product_list = $this->get_product_list();
+        if (is_wp_error($product_list)) {
+            $this->logger->error('Failed to fetch products: ' . $product_list->get_error_message());
+            return $product_list;
         }
 
-        // If API returns ['Data'] key, use it, else assume flat array
-        $product_list = isset($products['Data']) ? $products['Data'] : $products;
+        $summary = $this->process_product_list_in_batches(
+            $product_list,
+            self::get_batch_size(),
+            self::get_batch_delay_seconds()
+        );
 
-        $batchSize = 50;
-        $total = count($product_list);
-        $this->logger->info('Total products to sync: ' . $total);
-        for ($i = 0; $i < $total; $i += $batchSize) {
-            $batch = array_slice($product_list, $i, $batchSize);
-            $this->logger->info('Processing batch ' . (($i/$batchSize)+1) . ' (' . count($batch) . ' products)');
-            foreach ($batch as $product_data) {
-                $this->sync_single_product($product_data);
-            }
-            // Optional: pause between batches to reduce server load
-            if ($i + $batchSize < $total) {
-                $this->logger->info('Batch complete, sleeping 1 second before next batch...');
-                sleep(1);
-            }
-            // Optional: extend script execution time
-            if (function_exists('set_time_limit')) {
-                @set_time_limit(30);
-            }
-        }
+        $this->logger->info(sprintf(
+            'Product sync completed. Processed: %d Updated: %d Unchanged: %d Skipped: %d Failed: %d',
+            $summary['processed'],
+            $summary['updated'],
+            $summary['synced'],
+            $summary['skipped'],
+            $summary['failed']
+        ));
 
-        $this->logger->info('Product sync completed');
         return true;
     }
 
     /**
-     * Sync a single product from Powerall CRM to WooCommerce
+     * Start a manual sync run that can be processed in AJAX batches.
      *
-     * @param array $product_data Product data from Powerall CRM
-     * @return int|WP_Error Product ID on success, WP_Error on failure
+     * @return array|WP_Error
      */
-    private function sync_single_product($product_data) {
-        // Use SKU from Powerall as the unique identifier
-        $sku = isset($product_data['EanCode']) ? $product_data['EanCode'] : '';
-        $productName = $product_data['Description1'];
-        
-        if (!$sku) {
-            $this->logger->warning('Product missing SKU, skipping.' . $productName );
-            return false;
+    public function start_manual_sync_run() {
+        $previous_state = $this->read_manual_sync_state();
+        if (!empty($previous_state['run_id'])) {
+            $this->delete_manual_sync_cache($previous_state['run_id']);
         }
 
-       
-
-        $this->logger->info('Syncing product with SKU: ' . $sku . ' and ProductCode: ' . $product_data['ProductCode']);
-        $product_id = $this->get_woo_product_id_by_sku($sku);
-
-        if (!$product_id) {
-            $this->logger->warning('Product with SKU ' . $sku . ' Product Name: ' . $productName . ' not found in WooCommerce, skipping.');
-            // Optionally, create the product if it doesn't exist
-            // return $this->create_woo_product($product_data);
-            return false;
+        $product_list = $this->get_product_list();
+        if (is_wp_error($product_list)) {
+            $this->logger->error('Unable to start manual sync: ' . $product_list->get_error_message());
+            return $product_list;
         }
 
-
-       
-        
-        // Update existing product
-        $product = wc_get_product($product_id);
-        if (!$product) {
-            $this->logger->error('Product with ID ' . $product_id . ' not found in WooCommerce.');
-            return new \WP_Error('invalid_product', __('Product not found in WooCommerce.', 'dsn-woo-powerall'));
+        $run_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : uniqid('dsn_sync_', true);
+        $cache_result = $this->store_manual_sync_cache($run_id, $product_list);
+        if (is_wp_error($cache_result)) {
+            $this->logger->error('Unable to cache manual sync payload: ' . $cache_result->get_error_message());
+            return $cache_result;
         }
 
+        $state = array_merge($this->get_default_manual_sync_state(), array(
+            'run_id' => $run_id,
+            'status' => count($product_list) > 0 ? 'running' : 'completed',
+            'started_at' => current_time('mysql'),
+            'completed_at' => count($product_list) > 0 ? '' : current_time('mysql'),
+            'batch_size' => self::get_batch_size(),
+            'delay_seconds' => self::get_batch_delay_seconds(),
+            'total_products' => count($product_list),
+            'last_message' => count($product_list) > 0
+                ? __('Manual sync queued. Processing will begin shortly.', 'dsn-woo-powerall')
+                : __('No products were returned by Powerall.', 'dsn-woo-powerall'),
+        ));
 
-        $old_stock = $product->get_stock_quantity();
+        $this->save_manual_sync_state($state);
+        $this->logger->info('Manual product sync started. Run ID: ' . $run_id . ' | Products: ' . $state['total_products']);
 
-
-         //Need a new if statement here to check if the site wants the new price from Powerall or not use the normal sale price from the website
-        $use_powerall_price = get_option('dsn_woo_powerall_use_sale_price', '1');
-        if ($use_powerall_price) {
-            // Update only price and stock
-            $old_price = $product->get_sale_price();
-            
-            $new_price = $product_data['SalesPrice'] ?? $product_data['SalesPrice'] ?? '';
-
-            //check if price comes with VAT or not using the  SalesPriceIsIncVat boolean
-            //if is false then we add a 21% VAT to the price
-            if ($product_data['SalesPriceIsIncVat'] == false) {
-                $new_price = $new_price * 1.21;
-
-                // Make the new price be to 2 decimals safely (coerce to float first)
-                if ($new_price !== '' && $new_price !== null) {
-                    $new_price = round(floatval($new_price), 2);
-                }
-            }
-       
-    
-        // Make sure this product doesn't have promotional pricing coming from the syndified console
-        // If a console JSON exists for this product and contains an 'spp' promotional price, skip setting the sale price.
-        $has_console_promo = false;
-        $console_id = get_post_meta($product_id, 'console_id', true);
-       
-
-        if ($console_id) {
-            $console_path = trailingslashit( WP_CONTENT_DIR ) . 'plugins/syndified/website-content/json/Product/' . $console_id . '.json';
-            if (file_exists($console_path) && is_readable($console_path)) {
-                $this->logger->info('Found console JSON for product SKU ' . $sku . ': ' . $console_path);
-                $json = file_get_contents($console_path);
-                $data = json_decode($json, true);
-                if (is_array($data)) {
-                    // Check common places for 'spp' promotional price
-                    if (isset($data['spp']) && $data['spp'] !== '' && $data['spp'] !== null) {
-                        $has_console_promo = true;
-                        $this->logger->info('Console promo (spp) detected for SKU ' . $sku . ' (console id: ' . $console_id . ')');
-                    } elseif (isset($data['prices']) && isset($data['prices']['spp']) && $data['prices']['spp'] !== '') {
-                        $has_console_promo = true;
-                        $this->logger->info('Console promo (prices.spp) detected for SKU ' . $sku . ' (console id: ' . $console_id . ')');
-                    }
-                } else {
-                    $this->logger->warning('Console JSON for SKU ' . $sku . ' could not be decoded: ' . $console_path);
-                }
-            } else {
-                $this->logger->info('No console JSON file found for SKU ' . $sku . ' at expected path: ' . $console_path);
-            }
-        } else {
-            $this->logger->info('No console id found in product data for SKU ' . $sku . ', continuing with sale price logic');
+        if ($state['status'] === 'completed') {
+            $this->delete_manual_sync_cache($run_id);
         }
 
-
-        // Make sure the price is not the same as the old one (numeric comparison)
-        $old_price_num = $old_price !== '' ? floatval($old_price) : null;
-        $new_price_num = $new_price !== '' ? floatval($new_price) : null;
-        if ($has_console_promo) {
-            // Console promo exists — should not overwrite it with Powerall Price.
-            $this->logger->info('Console promo present; skipping sale price comparison for SKU ' . $sku);
-        } else {
-            if ($old_price_num !== null && $new_price_num !== null && abs($old_price_num - $new_price_num) < 0.0001) {
-                $product->set_sale_price('');
-            } else {
-                $product->set_sale_price($new_price);
-            }
-        }
-
-        } 
-
-        $product->set_manage_stock(true);
-
-        // Calculate total stock from StockPerWarehouse array
-        $total_stock = 0;
-        // if (isset($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
-        //     foreach ($product_data['StockPerWarehouse'] as $warehouse_stock) {
-        //         $total_stock += isset($warehouse_stock['FreeStock']) ? $warehouse_stock['FreeStock'] : 0;
-        //     }
-        // }
-
-        //just get the 1st stockperwarehouse and get the freestock
-        if (isset($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
-            if(isset($product_data['StockPerWarehouse'][0])) {
-                if(isset($product_data['StockPerWarehouse'][0]['FreeStock'])) {
-                    $total_stock = $product_data['StockPerWarehouse'][0]['FreeStock'];
-                }        
-            }
-        }
-
-        $product->set_stock_quantity($total_stock);
-
-
-        
-        // Log changes to a txt file if price or stock changed
-                if ($old_price != $new_price || $old_stock != $total_stock) {
-            $product_code = isset($product_data['ProductCode']) ? $product_data['ProductCode'] : ($product->get_sku() ?: 'N/A');
-            $product_name = isset($product_data['Description1']) ? $product_data['Description1'] : ($product->get_name() ?: 'N/A');
-            $log_entry = sprintf(
-                "[%s] ProductCode: %s | Name: %s | SKU: %s | Old Price: %s | New Price: %s | Old Stock: %s | New Stock: %s\n",
-                date('Y-m-d H:i:s'),
-                $product_code,
-                $product_name,
-                $product->get_sku(),
-                $old_price,
-                $new_price,
-                $old_stock,
-                $total_stock
-            );
-
-            $log_file = dirname(__FILE__) . '/../product_changes_log.txt';
-            file_put_contents($log_file, $log_entry, FILE_APPEND);
-            $this->logger->info('Product updated. SKU: ' . $sku . ' | Price: ' . $old_price . '→' . $new_price . ' | Stock: ' . $old_stock . '→' . $total_stock);
-        } else {
-            $this->logger->info('No changes for product SKU: ' . $sku);
-        }
-
-        // Save product
-        $product_id = $product->save();
-
-        if (is_wp_error($product_id)) {
-            $this->logger->error('Failed to save product SKU: ' . $sku . ' - ' . $product_id->get_error_message());
-            return $product_id;
-        }
-
-        $this->logger->info('Product sync complete for SKU: ' . $sku);
-        return $product_id;
+        return $this->prepare_manual_sync_state_response($state);
     }
 
     /**
-     * Get WooCommerce product ID by Powerall CRM product ID
+     * Process the next manual sync batch for a run.
      *
-     * @param string $powerall_id Powerall CRM product ID
-     * @return int|false Product ID if found, false otherwise
+     * @param string $run_id
+     * @return array|WP_Error
+     */
+    public function process_manual_sync_batch($run_id) {
+        $state = $this->read_manual_sync_state();
+
+        if (empty($state['run_id']) || empty($run_id)) {
+            return new \WP_Error('manual_sync_missing', __('No manual sync run was found.', 'dsn-woo-powerall'));
+        }
+
+        if ($state['run_id'] !== $run_id) {
+            return new \WP_Error('manual_sync_mismatch', __('The requested sync run no longer matches the saved sync state.', 'dsn-woo-powerall'));
+        }
+
+        if ($state['status'] === 'completed') {
+            return $this->prepare_manual_sync_state_response($state);
+        }
+
+        $offset = max(0, intval($state['current_offset']));
+        $total_products = max(0, intval($state['total_products']));
+
+        if ($total_products === 0 || $offset >= $total_products) {
+            $state = $this->complete_manual_sync_state($state, __('Product sync completed.', 'dsn-woo-powerall'));
+            return $this->prepare_manual_sync_state_response($state);
+        }
+
+        $batch_size = max(1, intval($state['batch_size']));
+        $batch = $this->get_manual_sync_batch_from_cache($run_id, $offset, $batch_size);
+        if (is_wp_error($batch)) {
+            $this->logger->error('Unable to load manual sync batch: ' . $batch->get_error_message());
+            return $batch;
+        }
+
+        if (empty($batch)) {
+            $state = $this->complete_manual_sync_state(
+                $state,
+                __('Product sync completed, but the cached batch data ended sooner than expected.', 'dsn-woo-powerall')
+            );
+            return $this->prepare_manual_sync_state_response($state);
+        }
+
+        $batch_summary = $this->process_product_batch($batch);
+
+        $state['processed'] += $batch_summary['processed'];
+        $state['updated'] += $batch_summary['updated'];
+        $state['synced'] += $batch_summary['synced'];
+        $state['skipped'] += $batch_summary['skipped'];
+        $state['failed'] += $batch_summary['failed'];
+        $state['current_offset'] = min($total_products, $offset + count($batch));
+
+        if (!empty($batch_summary['last_result'])) {
+            $state['last_sku'] = $batch_summary['last_result']['sku'] ?? '';
+            $state['last_product_name'] = $batch_summary['last_result']['product_name'] ?? '';
+        }
+
+        if (!empty($batch_summary['errors'])) {
+            $state['recent_errors'] = array_slice(
+                array_merge($state['recent_errors'], $batch_summary['errors']),
+                -self::MAX_STORED_ERRORS
+            );
+        }
+
+        if ($state['current_offset'] >= $total_products) {
+            $state = $this->complete_manual_sync_state($state, __('Product sync completed.', 'dsn-woo-powerall'));
+        } else {
+            $state['status'] = 'running';
+            $state['last_message'] = sprintf(
+                __('Processed %1$d of %2$d products.', 'dsn-woo-powerall'),
+                $state['processed'],
+                $total_products
+            );
+            $this->save_manual_sync_state($state);
+        }
+
+        return $this->prepare_manual_sync_state_response($state, array(
+            'batch_processed' => $batch_summary['processed'],
+            'batch_updated' => $batch_summary['updated'],
+            'batch_synced' => $batch_summary['synced'],
+            'batch_skipped' => $batch_summary['skipped'],
+            'batch_failed' => $batch_summary['failed'],
+        ));
+    }
+
+    /**
+     * Get the current manual sync state.
+     *
+     * @return array
+     */
+    public function get_manual_sync_state() {
+        return $this->prepare_manual_sync_state_response($this->read_manual_sync_state());
+    }
+
+    /**
+     * Sync a single product from Powerall CRM to WooCommerce.
+     *
+     * @param array $product_data Product data from Powerall CRM
+     * @return array<string, mixed>
+     */
+    private function sync_single_product($product_data) {
+        $sku = isset($product_data['EanCode']) ? trim((string) $product_data['EanCode']) : '';
+        $product_name = isset($product_data['Description1']) ? (string) $product_data['Description1'] : '';
+        $product_code = isset($product_data['ProductCode']) ? (string) $product_data['ProductCode'] : '';
+
+        $result = array(
+            'status' => 'skipped',
+            'sku' => $sku,
+            'product_code' => $product_code,
+            'product_name' => $product_name,
+            'product_id' => 0,
+            'message' => '',
+        );
+
+        if (!$sku) {
+            $result['message'] = 'Product missing SKU, skipping. ' . $product_name;
+            $this->logger->warning($result['message']);
+            return $result;
+        }
+
+        $this->logger->info('Syncing product with SKU: ' . $sku . ' and ProductCode: ' . $product_code);
+        $product_id = $this->get_woo_product_id_by_sku($sku);
+
+        if (!$product_id) {
+            $result['message'] = 'Product with SKU ' . $sku . ' Product Name: ' . $product_name . ' not found in WooCommerce, skipping.';
+            $this->logger->warning($result['message']);
+            return $result;
+        }
+
+        $result['product_id'] = $product_id;
+
+        // Always persist raw warehouse data for the frontend stock display shortcode,
+        // regardless of whether price/stock values changed this run.
+        if (!empty($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
+            update_post_meta($product_id, '_powerall_stock_warehouses', wp_json_encode($product_data['StockPerWarehouse']));
+        }
+
+        $product = wc_get_product($product_id);
+
+        if (!$product) {
+            $error = new \WP_Error('invalid_product', __('Product not found in WooCommerce.', 'dsn-woo-powerall'));
+            $result['status'] = 'failed';
+            $result['message'] = $error->get_error_message();
+            $this->logger->error('Product with ID ' . $product_id . ' not found in WooCommerce.');
+            return $result;
+        }
+
+        $old_stock = $product->get_stock_quantity();
+        $old_stock_status = $product->get_stock_status();
+        $old_price = $product->get_sale_price();
+        $new_price = $old_price;
+        $price_changed = false;
+        $manage_stock_changed = !$product->managing_stock();
+        $stock_changed = false;
+        $stock_status_changed = false;
+
+        $use_powerall_price = get_option('dsn_woo_powerall_use_sale_price', '1');
+        if ($use_powerall_price) {
+            // Prefer SalesPriceUnit (actieprijs / promotional price) when present and non-zero,
+            // otherwise fall back to SalesPrice.
+            $sales_price_unit = $product_data['SalesPriceUnit'] ?? '';
+            $has_promo_price = $sales_price_unit !== '' && $sales_price_unit !== null && floatval($sales_price_unit) > 0;
+
+            $new_price = $has_promo_price ? $sales_price_unit : ($product_data['SalesPrice'] ?? '');
+            $price_includes_vat = isset($product_data['SalesPriceIsIncVat'])
+                ? filter_var($product_data['SalesPriceIsIncVat'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
+                : null;
+
+            if ($has_promo_price) {
+                $this->logger->info('Using SalesPriceUnit (actieprijs) for SKU ' . $sku . ': ' . $sales_price_unit);
+            }
+
+            if ($price_includes_vat === false && $new_price !== '' && $new_price !== null) {
+                $new_price = floatval($new_price) * 1.21;
+            }
+
+            if ($new_price !== '' && $new_price !== null) {
+                $new_price = round(floatval($new_price), 2);
+            }
+
+            $has_console_promo = false;
+            $console_id = get_post_meta($product_id, 'console_id', true);
+
+            if ($console_id) {
+                $console_path = trailingslashit(WP_CONTENT_DIR) . 'plugins/syndified/website-content/json/Product/' . $console_id . '.json';
+                if (file_exists($console_path) && is_readable($console_path)) {
+                    $this->logger->info('Found console JSON for product SKU ' . $sku . ': ' . $console_path);
+                    $json = file_get_contents($console_path);
+                    $data = json_decode($json, true);
+                    if (is_array($data)) {
+                        if (isset($data['spp']) && $data['spp'] !== '' && $data['spp'] !== null) {
+                            $has_console_promo = true;
+                            $this->logger->info('Console promo (spp) detected for SKU ' . $sku . ' (console id: ' . $console_id . ')');
+                        } elseif (isset($data['prices']['spp']) && $data['prices']['spp'] !== '') {
+                            $has_console_promo = true;
+                            $this->logger->info('Console promo (prices.spp) detected for SKU ' . $sku . ' (console id: ' . $console_id . ')');
+                        }
+                    } else {
+                        $this->logger->warning('Console JSON for SKU ' . $sku . ' could not be decoded: ' . $console_path);
+                    }
+                } else {
+                    $this->logger->info('No console JSON file found for SKU ' . $sku . ' at expected path: ' . $console_path);
+                }
+            } else {
+                $this->logger->info('No console id found for SKU ' . $sku . ', continuing with sale price logic');
+            }
+
+            if (!$has_console_promo && $new_price !== '' && $new_price !== null) {
+                $old_price_num = $old_price !== '' && $old_price !== null ? floatval($old_price) : null;
+                $new_price_num = floatval($new_price);
+                if ($old_price_num === null || abs($old_price_num - $new_price_num) >= 0.0001) {
+                    $product->set_sale_price($new_price);
+                    $price_changed = true;
+                }
+            } elseif ($has_console_promo) {
+                $this->logger->info('Console promo present; skipping sale price update for SKU ' . $sku);
+            }
+        }
+
+        $product->set_manage_stock(true);
+
+        $new_stock = Stock_Helper::format_stock_quantity(
+            Stock_Helper::calculate_total_stock_from_product_data($product_data)
+        );
+        $new_stock_num = floatval($new_stock);
+        $old_stock_num = $old_stock !== '' && $old_stock !== null ? floatval($old_stock) : null;
+
+        if ($old_stock_num === null || abs($old_stock_num - $new_stock_num) >= 0.0001) {
+            $product->set_stock_quantity($new_stock);
+            $stock_changed = true;
+        }
+
+        $new_stock_status = $new_stock_num > 0 ? 'instock' : 'outofstock';
+        if ($old_stock_status !== $new_stock_status) {
+            $product->set_stock_status($new_stock_status);
+            $stock_status_changed = true;
+        }
+
+        $has_changes = $price_changed || $manage_stock_changed || $stock_changed || $stock_status_changed;
+
+        if (!$has_changes) {
+            $result['status'] = 'synced';
+            $result['message'] = 'No changes for product SKU: ' . $sku;
+            $this->logger->info($result['message']);
+            return $result;
+        }
+
+        if ($price_changed || $stock_changed) {
+            $log_file = dirname(__FILE__) . '/../product_changes_log.txt';
+            file_put_contents(
+                $log_file,
+                $this->build_product_change_log_entry($product, $product_data, $old_price, $new_price, $old_stock, $new_stock),
+                FILE_APPEND
+            );
+        }
+
+        $saved_product_id = $product->save();
+
+        if (is_wp_error($saved_product_id)) {
+            $result['status'] = 'failed';
+            $result['message'] = $saved_product_id->get_error_message();
+            $this->logger->error('Failed to save product SKU: ' . $sku . ' - ' . $saved_product_id->get_error_message());
+            return $result;
+        }
+
+        $result['status'] = 'updated';
+        $result['product_id'] = $saved_product_id;
+        $result['message'] = 'Product sync complete for SKU: ' . $sku;
+
+        $this->logger->info(sprintf(
+            'Product updated. SKU: %s | Price: %s→%s | Stock: %s→%s',
+            $sku,
+            $old_price,
+            $new_price,
+            $old_stock,
+            $new_stock
+        ));
+        $this->logger->info($result['message']);
+
+        return $result;
+    }
+
+    /**
+     * Build the external change log entry for a product update.
+     *
+     * @param \WC_Product $product
+     * @param array $product_data
+     * @param mixed $old_price
+     * @param mixed $new_price
+     * @param mixed $old_stock
+     * @param mixed $new_stock
+     * @return string
+     */
+    private function build_product_change_log_entry($product, array $product_data, $old_price, $new_price, $old_stock, $new_stock) {
+        $product_code = isset($product_data['ProductCode']) ? $product_data['ProductCode'] : ($product->get_sku() ?: 'N/A');
+        $product_name = isset($product_data['Description1']) ? $product_data['Description1'] : ($product->get_name() ?: 'N/A');
+
+        return sprintf(
+            "[%s] ProductCode: %s | Name: %s | SKU: %s | Old Price: %s | New Price: %s | Old Stock: %s | New Stock: %s\n",
+            date('Y-m-d H:i:s'),
+            $product_code,
+            $product_name,
+            $product->get_sku(),
+            $old_price,
+            $new_price,
+            $old_stock,
+            $new_stock
+        );
+    }
+
+    /**
+     * Get WooCommerce product ID by SKU.
+     *
+     * @param string $sku
+     * @return int|false
      */
     private function get_woo_product_id_by_sku($sku) {
         global $wpdb;
 
         $product_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT post_id FROM {$wpdb->postmeta} 
-            WHERE meta_key = '_sku' 
-            AND meta_value = %s 
+            "SELECT post_id FROM {$wpdb->postmeta}
+            WHERE meta_key = '_sku'
+            AND meta_value = %s
             LIMIT 1",
             $sku
         ));
@@ -256,7 +464,7 @@ class Product_Sync {
     }
 
     /**
-     * Check product stock in Powerall CRM before purchase
+     * Check product stock in Powerall CRM before purchase.
      *
      * @param int $product_id WooCommerce product ID
      * @param int $quantity Requested quantity
@@ -327,19 +535,18 @@ class Product_Sync {
                     continue;
                 }
 
-                // For variable products, iterate variations
                 if ($prod->is_type('variable')) {
                     foreach ($prod->get_children() as $var_id) {
                         $variation = wc_get_product($var_id);
-                        if (!$variation) continue;
+                        if (!$variation) {
+                            continue;
+                        }
                         $regular = $variation->get_regular_price();
                         $sale = $variation->get_sale_price();
 
-                        // Round the sale price safely to 2 decimals (coerce to float first)
                         if ($sale !== '' && $sale !== null) {
                             $sale = round(floatval($sale), 2);
                         }
-
 
                         $regular_num = $regular !== '' ? floatval($regular) : null;
                         $sale_num = $sale !== '' ? floatval($sale) : null;
@@ -353,7 +560,6 @@ class Product_Sync {
                 } else {
                     $regular = $prod->get_regular_price();
                     $sale = $prod->get_sale_price();
-                    // Round the sale price safely to 2 decimals (coerce to float first)
                     if ($sale !== '' && $sale !== null) {
                         $sale = round(floatval($sale), 2);
                     }
@@ -369,7 +575,6 @@ class Product_Sync {
                 }
             }
 
-            // Free memory and advance
             wp_reset_postdata();
             $paged++;
             if (function_exists('set_time_limit')) {
@@ -407,19 +612,22 @@ class Product_Sync {
         foreach ($ids as $pid) {
             $processed++;
             $prod = wc_get_product($pid);
-            if (!$prod) continue;
+            if (!$prod) {
+                continue;
+            }
 
             if ($prod->is_type('variable')) {
                 foreach ($prod->get_children() as $var_id) {
                     $variation = wc_get_product($var_id);
-                    if (!$variation) continue;
+                    if (!$variation) {
+                        continue;
+                    }
                     $regular = $variation->get_regular_price();
                     $sale = $variation->get_sale_price();
 
-                        // Round the sale price safely to 2 decimals (coerce to float first)
-                        if ($sale !== '' && $sale !== null) {
-                            $sale = round(floatval($sale), 2);
-                        }
+                    if ($sale !== '' && $sale !== null) {
+                        $sale = round(floatval($sale), 2);
+                    }
 
                     $regular_num = $regular !== '' ? floatval($regular) : null;
                     $sale_num = $sale !== '' ? floatval($sale) : null;
@@ -434,10 +642,9 @@ class Product_Sync {
                 $regular = $prod->get_regular_price();
                 $sale = $prod->get_sale_price();
 
-                        // Round the sale price safely to 2 decimals (coerce to float first)
-                        if ($sale !== '' && $sale !== null) {
-                            $sale = round(floatval($sale), 2);
-                        }
+                if ($sale !== '' && $sale !== null) {
+                    $sale = round(floatval($sale), 2);
+                }
 
                 $regular_num = $regular !== '' ? floatval($regular) : null;
                 $sale_num = $sale !== '' ? floatval($sale) : null;
@@ -453,4 +660,354 @@ class Product_Sync {
         wp_reset_postdata();
         return array('processed' => $processed, 'updated' => $updated);
     }
-} 
+
+    /**
+     * Get the product list from the Powerall API response.
+     *
+     * @return array|WP_Error
+     */
+    private function get_product_list() {
+        $products = $this->api_handler->get_products();
+
+        if (is_wp_error($products)) {
+            return $products;
+        }
+
+        $product_list = isset($products['Data']) ? $products['Data'] : $products;
+
+        if (!is_array($product_list)) {
+            return new \WP_Error('invalid_products_response', __('Invalid product list returned by Powerall.', 'dsn-woo-powerall'));
+        }
+
+        return array_values($product_list);
+    }
+
+    /**
+     * Process a full product list in batches.
+     *
+     * @param array $product_list
+     * @param int $batch_size
+     * @param int $delay_seconds
+     * @return array
+     */
+    private function process_product_list_in_batches(array $product_list, $batch_size, $delay_seconds) {
+        $summary = $this->create_sync_summary();
+        $total = count($product_list);
+
+        $this->logger->info('Total products to sync: ' . $total . ' | Batch size: ' . $batch_size);
+
+        for ($offset = 0; $offset < $total; $offset += $batch_size) {
+            $batch = array_slice($product_list, $offset, $batch_size);
+            $batch_number = intval(floor($offset / $batch_size)) + 1;
+
+            $this->logger->info('Processing batch ' . $batch_number . ' (' . count($batch) . ' products)');
+            $batch_summary = $this->process_product_batch($batch);
+            $summary = $this->merge_sync_summaries($summary, $batch_summary);
+
+            if ($offset + $batch_size < $total && $delay_seconds > 0) {
+                $this->logger->info('Batch complete, sleeping ' . $delay_seconds . ' second(s) before next batch...');
+                sleep($delay_seconds);
+            }
+
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(30);
+            }
+        }
+
+        return $summary;
+    }
+
+    /**
+     * Process one batch of products and return summary counters.
+     *
+     * @param array $products
+     * @return array
+     */
+    private function process_product_batch(array $products) {
+        $summary = $this->create_sync_summary();
+
+        foreach ($products as $product_data) {
+            $item_result = $this->sync_single_product($product_data);
+
+            $summary['processed']++;
+            $summary['last_result'] = $item_result;
+
+            switch ($item_result['status']) {
+                case 'updated':
+                    $summary['updated']++;
+                    break;
+                case 'failed':
+                    $summary['failed']++;
+                    if (!empty($item_result['message'])) {
+                        $summary['errors'][] = $item_result['message'];
+                    }
+                    break;
+                case 'skipped':
+                    $summary['skipped']++;
+                    break;
+                case 'synced':
+                default:
+                    $summary['synced']++;
+                    break;
+            }
+
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(20);
+            }
+        }
+
+        return $summary;
+    }
+
+    /**
+     * Create an empty sync summary.
+     *
+     * @return array
+     */
+    private function create_sync_summary() {
+        return array(
+            'processed' => 0,
+            'updated' => 0,
+            'synced' => 0,
+            'skipped' => 0,
+            'failed' => 0,
+            'last_result' => null,
+            'errors' => array(),
+        );
+    }
+
+    /**
+     * Merge batch counters into the full sync summary.
+     *
+     * @param array $summary
+     * @param array $batch_summary
+     * @return array
+     */
+    private function merge_sync_summaries(array $summary, array $batch_summary) {
+        $summary['processed'] += $batch_summary['processed'];
+        $summary['updated'] += $batch_summary['updated'];
+        $summary['synced'] += $batch_summary['synced'];
+        $summary['skipped'] += $batch_summary['skipped'];
+        $summary['failed'] += $batch_summary['failed'];
+        $summary['last_result'] = $batch_summary['last_result'];
+        $summary['errors'] = array_slice(
+            array_merge($summary['errors'], $batch_summary['errors']),
+            -self::MAX_STORED_ERRORS
+        );
+
+        return $summary;
+    }
+
+    /**
+     * Get the default manual sync state.
+     *
+     * @return array
+     */
+    private function get_default_manual_sync_state() {
+        return array(
+            'run_id' => '',
+            'status' => 'idle',
+            'started_at' => '',
+            'completed_at' => '',
+            'batch_size' => self::get_batch_size(),
+            'delay_seconds' => self::get_batch_delay_seconds(),
+            'total_products' => 0,
+            'processed' => 0,
+            'updated' => 0,
+            'synced' => 0,
+            'skipped' => 0,
+            'failed' => 0,
+            'current_offset' => 0,
+            'last_message' => __('Manual sync has not been started yet.', 'dsn-woo-powerall'),
+            'last_sku' => '',
+            'last_product_name' => '',
+            'recent_errors' => array(),
+        );
+    }
+
+    /**
+     * Read the saved manual sync state.
+     *
+     * @return array
+     */
+    private function read_manual_sync_state() {
+        $state = get_option(self::MANUAL_SYNC_STATE_OPTION, array());
+
+        if (!is_array($state)) {
+            $state = array();
+        }
+
+        return wp_parse_args($state, $this->get_default_manual_sync_state());
+    }
+
+    /**
+     * Save the manual sync state.
+     *
+     * @param array $state
+     * @return void
+     */
+    private function save_manual_sync_state(array $state) {
+        update_option(self::MANUAL_SYNC_STATE_OPTION, $state, false);
+    }
+
+    /**
+     * Prepare the manual sync state for the UI response.
+     *
+     * @param array $state
+     * @param array $extra
+     * @return array
+     */
+    private function prepare_manual_sync_state_response(array $state, array $extra = array()) {
+        $state = wp_parse_args($state, $this->get_default_manual_sync_state());
+
+        $total_products = max(0, intval($state['total_products']));
+        $processed = max(0, intval($state['processed']));
+        $batch_size = max(1, intval($state['batch_size']));
+        $offset = max(0, intval($state['current_offset']));
+        $total_batches = $total_products > 0 ? (int) ceil($total_products / $batch_size) : 0;
+        $progress = $total_products > 0 ? round(($processed / $total_products) * 100, 2) : ($state['status'] === 'completed' ? 100 : 0);
+
+        if ($total_batches === 0) {
+            $current_batch = 0;
+        } elseif ($state['status'] === 'completed') {
+            $current_batch = $total_batches;
+        } else {
+            $current_batch = min($total_batches, (int) floor($offset / $batch_size) + 1);
+        }
+
+        return array_merge($state, array(
+            'progress_percentage' => $progress,
+            'remaining' => max(0, $total_products - $processed),
+            'total_batches' => $total_batches,
+            'current_batch' => $current_batch,
+        ), $extra);
+    }
+
+    /**
+     * Mark a manual sync as completed and clean up its cache file.
+     *
+     * @param array $state
+     * @param string $message
+     * @return array
+     */
+    private function complete_manual_sync_state(array $state, $message = '') {
+        $state['status'] = 'completed';
+        $state['completed_at'] = current_time('mysql');
+        $state['current_offset'] = max(intval($state['current_offset']), intval($state['total_products']));
+        if ($message !== '') {
+            $state['last_message'] = $message;
+        }
+
+        $this->save_manual_sync_state($state);
+        $this->delete_manual_sync_cache($state['run_id']);
+
+        return $state;
+    }
+
+    /**
+     * Get the directory used for manual sync cache files.
+     *
+     * @return string
+     */
+    private function get_manual_sync_cache_directory() {
+        $upload_dir = wp_upload_dir();
+
+        return trailingslashit($upload_dir['basedir']) . 'dsn-woo-powerall-sync-cache';
+    }
+
+    /**
+     * Get the file path for a manual sync cache file.
+     *
+     * @param string $run_id
+     * @return string
+     */
+    private function get_manual_sync_cache_file($run_id) {
+        return trailingslashit($this->get_manual_sync_cache_directory()) . sanitize_file_name($run_id) . '.ndjson';
+    }
+
+    /**
+     * Cache the fetched product list to disk for manual batch processing.
+     *
+     * @param string $run_id
+     * @param array $product_list
+     * @return true|WP_Error
+     */
+    private function store_manual_sync_cache($run_id, array $product_list) {
+        $cache_directory = $this->get_manual_sync_cache_directory();
+        if (!file_exists($cache_directory) && !wp_mkdir_p($cache_directory)) {
+            return new \WP_Error('manual_sync_cache_dir', __('Unable to create the manual sync cache directory.', 'dsn-woo-powerall'));
+        }
+
+        $handle = fopen($this->get_manual_sync_cache_file($run_id), 'wb');
+        if ($handle === false) {
+            return new \WP_Error('manual_sync_cache_write', __('Unable to open the manual sync cache file for writing.', 'dsn-woo-powerall'));
+        }
+
+        foreach ($product_list as $product_data) {
+            $line = wp_json_encode($product_data);
+            if ($line === false || fwrite($handle, $line . PHP_EOL) === false) {
+                fclose($handle);
+                return new \WP_Error('manual_sync_cache_write', __('Unable to write the manual sync cache file.', 'dsn-woo-powerall'));
+            }
+        }
+
+        fclose($handle);
+
+        return true;
+    }
+
+    /**
+     * Read a batch of product data from the manual sync cache.
+     *
+     * @param string $run_id
+     * @param int $offset
+     * @param int $limit
+     * @return array|WP_Error
+     */
+    private function get_manual_sync_batch_from_cache($run_id, $offset, $limit) {
+        $cache_file = $this->get_manual_sync_cache_file($run_id);
+
+        if (!file_exists($cache_file) || !is_readable($cache_file)) {
+            return new \WP_Error('manual_sync_cache_missing', __('The manual sync cache file could not be found.', 'dsn-woo-powerall'));
+        }
+
+        $batch = array();
+        $file = new \SplFileObject($cache_file, 'r');
+        $file->seek(max(0, $offset));
+
+        while (!$file->eof() && count($batch) < $limit) {
+            $line = trim((string) $file->current());
+            $file->next();
+
+            if ($line === '') {
+                continue;
+            }
+
+            $decoded = json_decode($line, true);
+            if (!is_array($decoded)) {
+                return new \WP_Error('manual_sync_cache_invalid', __('The manual sync cache data is invalid.', 'dsn-woo-powerall'));
+            }
+
+            $batch[] = $decoded;
+        }
+
+        return $batch;
+    }
+
+    /**
+     * Delete the cached manual sync file for a run.
+     *
+     * @param string $run_id
+     * @return void
+     */
+    private function delete_manual_sync_cache($run_id) {
+        if (empty($run_id)) {
+            return;
+        }
+
+        $cache_file = $this->get_manual_sync_cache_file($run_id);
+        if (file_exists($cache_file)) {
+            @unlink($cache_file);
+        }
+    }
+}
