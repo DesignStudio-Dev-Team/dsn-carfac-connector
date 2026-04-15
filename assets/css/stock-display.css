@@ -1,10 +1,16 @@
 /* =========================================================
    DSN Powerall — Frontend Stock Display
-   Override any of these in your child theme stylesheet.
-   All selectors are prefixed with .dsn-stock to avoid conflicts.
+   All selectors are prefixed with .dsn-stock to avoid
+   conflicts. Override freely in your child theme stylesheet.
    ========================================================= */
 
-/* --- Shared list layout ---------------------------------- */
+/* --- Shared -------------------------------------------- */
+.dsn-stock {
+    font-size: 0.9em;
+    margin: 0.75em 0;
+}
+
+/* --- List ---------------------------------------------- */
 .dsn-stock__list {
     list-style: none;
     margin: 0;
@@ -12,57 +18,35 @@
 }
 
 .dsn-stock__item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 0;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    padding: 3px 0;
+    line-height: 1.5;
 }
 
-.dsn-stock__item:last-child {
-    border-bottom: none;
-}
-
-.dsn-stock__location {
-    font-weight: 500;
-    margin-right: 12px;
-}
-
-.dsn-stock__value {
-    font-variant-numeric: tabular-nums;
-    color: #3a7c52;
+.dsn-stock__location-name {
     font-weight: 600;
 }
 
-/* --- Combined view --------------------------------------- */
-.dsn-stock--combined {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+.dsn-stock__qty {
+    font-weight: 700;
 }
 
 .dsn-stock__label {
     color: #555;
 }
 
-/* --- "Show more" button ---------------------------------- */
-.dsn-stock__show-more {
+/* --- Combined ------------------------------------------ */
+.dsn-stock--combined {
+    line-height: 1.5;
+}
+
+/* --- "View more" link ---------------------------------- */
+.dsn-stock__view-more {
     display: inline-block;
-    margin-top: 10px;
-    padding: 0;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: #0073aa;
-    text-decoration: underline;
-    font-size: inherit;
+    margin-top: 6px;
+    font-size: 0.875em;
 }
 
-.dsn-stock__show-more:hover {
-    color: #005177;
-}
-
-/* --- Modal backdrop -------------------------------------- */
+/* --- Modal overlay ------------------------------------- */
 .dsn-stock-modal {
     position: fixed;
     inset: 0;
@@ -79,39 +63,50 @@
 .dsn-stock-modal__backdrop {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.45);
 }
 
-/* --- Modal content box ----------------------------------- */
-.dsn-stock-modal__content {
+/* --- Modal box ----------------------------------------- */
+.dsn-stock-modal__box {
     position: relative;
     background: #fff;
     border-radius: 6px;
-    padding: 28px 32px;
-    width: min(480px, 90vw);
+    padding: 28px 32px 24px;
+    width: min(420px, 90vw);
     max-height: 80vh;
     overflow-y: auto;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
 }
 
 .dsn-stock-modal__title {
-    margin: 0 0 16px;
-    font-size: 1.15em;
+    margin: 0 0 14px;
+    font-size: 1.05em;
+    font-weight: 600;
 }
 
 .dsn-stock-modal__close {
     position: absolute;
-    top: 12px;
-    right: 14px;
+    top: 10px;
+    right: 12px;
     background: none;
     border: none;
-    font-size: 1.5rem;
+    font-size: 1.4rem;
     line-height: 1;
     cursor: pointer;
-    color: #555;
+    color: #888;
     padding: 4px 8px;
 }
 
 .dsn-stock-modal__close:hover {
-    color: #000;
+    color: #222;
+}
+
+/* Inside the modal the same list styles apply */
+.dsn-stock-modal__box .dsn-stock__item {
+    padding: 5px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.dsn-stock-modal__box .dsn-stock__item:last-child {
+    border-bottom: none;
 }

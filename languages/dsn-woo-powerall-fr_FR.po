@@ -1,0 +1,41 @@
+# French (France) translation for DSN WooCommerce to Powerall Connector
+# Copyright (C) 2024 DesignStudio Network Inc
+msgid ""
+msgstr ""
+"Project-Id-Version: DSN WooCommerce to Powerall Connector\n"
+"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"PO-Revision-Date: 2024-01-01 00:00+0000\n"
+"Language: fr_FR\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+"X-Generator: Manual\n"
+"X-Domain: dsn-woo-powerall\n"
+
+msgid "Available in stock"
+msgstr "En stock"
+
+msgid "(can be backordered)"
+msgstr "(peut être commandé en rupture de stock)"
+
+#. translators: %d: number of additional warehouse locations not yet visible. Example: "View 2 more locations"
+#, php-format
+msgid "View %d more locations"
+msgstr "Voir %d autres emplacements"
+
+msgid "Stock by location"
+msgstr "Stock par emplacement"
+
+#. translators: Accessible label for the × button that closes the stock modal
+msgid "Close"
+msgstr "Fermer"
+
+#. translators: Fallback label for a Powerall warehouse when no description or code is available
+msgid "Location"
+msgstr "Emplacement"
+
+#. translators: 1: stock quantity number, 2: backorder notice e.g. " (can be backordered)" or empty string
+#, php-format
+msgid "%1$d Available in stock%2$s"
+msgstr "%1$d En stock%2$s"

@@ -1,50 +1,51 @@
 /**
  * DSN Powerall — Stock Display Modal
- * No dependencies (no jQuery required).
+ * Vanilla JS, no dependencies.
  */
-(function () {
+( function () {
     'use strict';
 
-    function openModal(modal) {
-        modal.removeAttribute('hidden');
-        modal.focus();
+    function openModal( modal ) {
+        modal.removeAttribute( 'hidden' );
         document.body.style.overflow = 'hidden';
+
+        // Move focus to the close button for accessibility
+        var closeBtn = modal.querySelector( '.dsn-stock-modal__close' );
+        if ( closeBtn ) closeBtn.focus();
     }
 
-    function closeModal(modal) {
-        modal.setAttribute('hidden', '');
+    function closeModal( modal ) {
+        modal.setAttribute( 'hidden', '' );
         document.body.style.overflow = '';
     }
 
-    document.addEventListener('click', function (e) {
-        // Open modal via "Show more" button
-        var trigger = e.target.closest('.dsn-stock__show-more');
-        if (trigger) {
-            var modalId = trigger.getAttribute('data-modal');
-            var modal   = modalId ? document.getElementById(modalId) : null;
-            if (modal) {
-                openModal(modal);
-            }
+    document.addEventListener( 'click', function ( e ) {
+        // Prevent default on the "View more" link so the hash doesn't land in the URL
+        var trigger = e.target.closest( '.dsn-stock__view-more' );
+        if ( trigger ) {
+            e.preventDefault();
+            var modalId = trigger.getAttribute( 'data-modal' );
+            var modal   = modalId ? document.getElementById( modalId ) : null;
+            if ( modal ) openModal( modal );
             return;
         }
 
         // Close via × button
-        if (e.target.closest('.dsn-stock-modal__close')) {
-            var modal = e.target.closest('.dsn-stock-modal');
-            if (modal) closeModal(modal);
+        var closeBtn = e.target.closest( '.dsn-stock-modal__close' );
+        if ( closeBtn ) {
+            closeModal( closeBtn.closest( '.dsn-stock-modal' ) );
             return;
         }
 
         // Close by clicking the backdrop
-        if (e.target.classList.contains('dsn-stock-modal__backdrop')) {
-            closeModal(e.target.closest('.dsn-stock-modal'));
+        if ( e.target.classList.contains( 'dsn-stock-modal__backdrop' ) ) {
+            closeModal( e.target.closest( '.dsn-stock-modal' ) );
         }
-    });
+    } );
 
-    // Close on Escape key
-    document.addEventListener('keydown', function (e) {
-        if (e.key !== 'Escape') return;
-        var openModals = document.querySelectorAll('.dsn-stock-modal:not([hidden])');
-        openModals.forEach(closeModal);
-    });
-}());
+    // Close on Escape
+    document.addEventListener( 'keydown', function ( e ) {
+        if ( e.key !== 'Escape' ) return;
+        document.querySelectorAll( '.dsn-stock-modal:not([hidden])' ).forEach( closeModal );
+    } );
+}() );

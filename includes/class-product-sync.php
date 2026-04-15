@@ -291,18 +291,17 @@ class Product_Sync {
 
         $use_powerall_price = get_option('dsn_woo_powerall_use_sale_price', '1');
         if ($use_powerall_price) {
-            // Prefer SalesPriceUnit (actieprijs / promotional price) when present and non-zero,
-            // otherwise fall back to SalesPrice.
-            $sales_price_unit = $product_data['SalesPriceUnit'] ?? '';
-            $has_promo_price = $sales_price_unit !== '' && $sales_price_unit !== null && floatval($sales_price_unit) > 0;
+            // Use PromotionalPrice when present and non-zero, otherwise fall back to SalesPrice.
+            $promotional_price = $product_data['PromotionalPrice'] ?? '';
+            $has_promo_price   = $promotional_price !== '' && $promotional_price !== null && floatval($promotional_price) > 0;
 
-            $new_price = $has_promo_price ? $sales_price_unit : ($product_data['SalesPrice'] ?? '');
+            $new_price = $has_promo_price ? $promotional_price : ($product_data['SalesPrice'] ?? '');
             $price_includes_vat = isset($product_data['SalesPriceIsIncVat'])
                 ? filter_var($product_data['SalesPriceIsIncVat'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
                 : null;
 
             if ($has_promo_price) {
-                $this->logger->info('Using SalesPriceUnit (actieprijs) for SKU ' . $sku . ': ' . $sales_price_unit);
+                $this->logger->info('Using PromotionalPrice for SKU ' . $sku . ': ' . $promotional_price);
             }
 
             if ($price_includes_vat === false && $new_price !== '' && $new_price !== null) {
@@ -398,6 +397,17 @@ class Product_Sync {
             return $result;
         }
 
+        // Propagate price and stock meta to all WPML-translated versions of this product.
+        // WooCommerce only saves meta to the original post; translated posts get stale values.
+        if ($price_changed || $stock_changed) {
+            $this->sync_meta_to_wpml_translations(
+                $saved_product_id,
+                $price_changed ? $new_price : null,
+                $stock_changed ? $new_stock : null,
+                $new_stock_status
+            );
+        }
+
         $result['status'] = 'updated';
         $result['product_id'] = $saved_product_id;
         $result['message'] = 'Product sync complete for SKU: ' . $sku;
@@ -426,6 +436,80 @@ class Product_Sync {
      * @param mixed $new_stock
      * @return string
      */
+    /**
+     * When WPML is active, push updated price and stock meta to every translated
+     * version of the product. WooCommerce only writes meta to the original post,
+     * leaving translated posts with stale values that show the wrong price/stock
+     * on language-specific pages.
+     *
+     * @param int        $product_id      The original (source-language) product ID.
+     * @param string|null $new_sale_price  Pass null to skip price update.
+     * @param mixed       $new_stock       Pass null to skip stock update.
+     * @param string      $new_stock_status 'instock' | 'outofstock'
+     * @return void
+     */
+    private function sync_meta_to_wpml_translations(
+        int $product_id,
+        $new_sale_price,
+        $new_stock,
+        string $new_stock_status
+    ): void {
+        // Bail early if WPML is not loaded.
+        $trid = apply_filters('wpml_element_trid', null, $product_id, 'post_product');
+        if (!$trid) {
+            return;
+        }
+
+        $translations = apply_filters('wpml_get_element_translations', null, $trid, 'post_product');
+        if (!is_array($translations) || empty($translations)) {
+            return;
+        }
+
+        $synced = array();
+
+        foreach ($translations as $translation) {
+            $translated_id = (int) ($translation->element_id ?? 0);
+
+            // Skip the original — WooCommerce already saved it.
+            if (!$translated_id || $translated_id === $product_id) {
+                continue;
+            }
+
+            if ($new_sale_price !== null) {
+                $sale = $new_sale_price !== '' ? wc_format_decimal($new_sale_price) : '';
+
+                update_post_meta($translated_id, '_sale_price', $sale);
+
+                // _price is the effective price WooCommerce displays.
+                // When a sale price is set it should match; otherwise keep regular price.
+                if ($sale !== '') {
+                    update_post_meta($translated_id, '_price', $sale);
+                } else {
+                    // Sale removed — restore _price to the regular price.
+                    $regular = get_post_meta($translated_id, '_regular_price', true);
+                    update_post_meta($translated_id, '_price', $regular);
+                }
+            }
+
+            if ($new_stock !== null) {
+                update_post_meta($translated_id, '_stock', $new_stock);
+                update_post_meta($translated_id, '_stock_status', $new_stock_status);
+                update_post_meta($translated_id, '_manage_stock', 'yes');
+                wc_delete_product_transients($translated_id);
+            }
+
+            $synced[] = $translated_id;
+        }
+
+        if (!empty($synced)) {
+            $this->logger->info(sprintf(
+                'WPML: synced price/stock to translated product IDs [%s] for original ID %d',
+                implode(', ', $synced),
+                $product_id
+            ));
+        }
+    }
+
     private function build_product_change_log_entry($product, array $product_data, $old_price, $new_price, $old_stock, $new_stock) {
         $product_code = isset($product_data['ProductCode']) ? $product_data['ProductCode'] : ($product->get_sku() ?: 'N/A');
         $product_name = isset($product_data['Description1']) ? $product_data['Description1'] : ($product->get_name() ?: 'N/A');

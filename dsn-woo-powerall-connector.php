@@ -68,6 +68,30 @@ function dsn_woo_powerall_init() {
 }
 add_action('plugins_loaded', 'dsn_woo_powerall_init');
 
+/**
+ * Load plugin text domain so translations in /languages are applied.
+ * Must run on 'init' — running it on 'plugins_loaded' is too early for
+ * some translation plugins (e.g. WPML, Loco Translate).
+ */
+function dsn_woo_powerall_load_textdomain() {
+    load_plugin_textdomain(
+        'dsn-woo-powerall',
+        false,
+        dirname( plugin_basename( __FILE__ ) ) . '/languages'
+    );
+}
+add_action( 'init', 'dsn_woo_powerall_load_textdomain' );
+
+/**
+ * When WPML switches the active language it may do so after the textdomain
+ * has already been loaded with the previous locale. Unload and reload so the
+ * correct .mo file is used for the new language.
+ */
+add_action( 'wpml_language_has_switched', function () {
+    unload_textdomain( 'dsn-woo-powerall' );
+    dsn_woo_powerall_load_textdomain();
+} );
+
 // Activation hook
 register_activation_hook(__FILE__, function() {
     // Check PHP version
