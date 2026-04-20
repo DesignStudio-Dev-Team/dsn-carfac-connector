@@ -66,16 +66,18 @@ class DSN_Woo_Powerall {
         $tools_hook    = isset($this->admin_settings->tools_page_hook) ? $this->admin_settings->tools_page_hook : '';
 
         if ($hook === $settings_hook) {
-            // selectWoo (WooCommerce-bundled Select2 fork) powers the warehouse picker on the settings page.
-            if (wp_script_is('selectWoo', 'registered')) {
-                wp_enqueue_script('selectWoo');
-            }
-            if (wp_style_is('select2', 'registered')) {
-                wp_enqueue_style('select2');
-            }
-            wp_add_inline_script(
-                wp_script_is('selectWoo', 'registered') ? 'selectWoo' : 'jquery',
-                "jQuery(function($){ var \$el = $('#dsn-excluded-warehouses'); if (!\$el.length) return; if (typeof $.fn.selectWoo === 'function') { \$el.selectWoo({ width: '100%', placeholder: \$el.data('placeholder') || '', allowClear: true }); } else if (typeof $.fn.select2 === 'function') { \$el.select2({ width: '100%', placeholder: \$el.data('placeholder') || '', allowClear: true }); } });"
+            wp_enqueue_style(
+                'dsn-location-picker',
+                plugins_url('../assets/css/location-picker.css', __FILE__),
+                array(),
+                DSN_WOO_POWERALL_VERSION
+            );
+            wp_enqueue_script(
+                'dsn-location-picker',
+                plugins_url('../assets/js/location-picker.js', __FILE__),
+                array(),
+                DSN_WOO_POWERALL_VERSION,
+                true
             );
             return;
         }

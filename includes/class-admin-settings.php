@@ -645,18 +645,19 @@ class Admin_Settings {
         <?php if (empty($known)) : ?>
             <p><em><?php esc_html_e('No warehouse locations discovered yet. Run a sync or click "Refresh warehouse list" below to scan existing product data.', 'dsn-woo-powerall'); ?></em></p>
         <?php else : ?>
-            <select id="dsn-excluded-warehouses"
-                    name="<?php echo esc_attr($option); ?>[excluded][]"
-                    multiple="multiple"
-                    class="regular-text"
-                    style="width:100%; max-width:600px;"
-                    data-placeholder="<?php echo esc_attr($placeholder); ?>">
-                <?php foreach ($known as $name) : ?>
-                    <option value="<?php echo esc_attr($name); ?>" <?php selected(in_array($name, $excluded, true)); ?>>
-                        <?php echo esc_html($name); ?>
-                    </option>
-                <?php endforeach; ?>
-            </select>
+            <div class="dsn-picker" id="dsn-excluded-warehouses-picker">
+                <select id="dsn-excluded-warehouses"
+                        class="dsn-picker__native"
+                        name="<?php echo esc_attr($option); ?>[excluded][]"
+                        multiple="multiple"
+                        data-placeholder="<?php echo esc_attr($placeholder); ?>">
+                    <?php foreach ($known as $name) : ?>
+                        <option value="<?php echo esc_attr($name); ?>" <?php selected(in_array($name, $excluded, true)); ?>>
+                            <?php echo esc_html($name); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
         <?php endif; ?>
         <p class="description">
             <?php esc_html_e('Select the Powerall locations you want to ignore. Selected locations are removed from the WooCommerce stock total and hidden on the per-warehouse frontend display. Locations are identified by their Powerall Description. Use the "Refresh warehouse list" button below to rescan after new locations appear.', 'dsn-woo-powerall'); ?>

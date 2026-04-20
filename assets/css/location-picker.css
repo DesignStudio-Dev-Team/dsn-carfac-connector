@@ -1,0 +1,163 @@
+/* DSN Woo Powerall — custom pill multi-select for warehouse locations. */
+
+.dsn-picker {
+    position: relative;
+    max-width: 600px;
+    font-size: 13px;
+}
+
+.dsn-picker__native {
+    /* Keep the real <select> for form submission, visually hidden. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.dsn-picker__control {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    min-height: 34px;
+    padding: 4px 6px;
+    background: #fff;
+    border: 1px solid #8c8f94;
+    border-radius: 4px;
+    cursor: text;
+    transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.dsn-picker.is-open .dsn-picker__control,
+.dsn-picker__control:focus-within {
+    border-color: #2271b1;
+    box-shadow: 0 0 0 1px #2271b1;
+    outline: none;
+}
+
+.dsn-picker__pills {
+    display: contents;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.dsn-picker__pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
+    background: #2271b1;
+    color: #fff;
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1.5;
+    max-width: 100%;
+}
+
+.dsn-picker__pill-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dsn-picker__pill-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 999px;
+    color: #fff;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.dsn-picker__pill-remove:hover,
+.dsn-picker__pill-remove:focus {
+    background: rgba(255, 255, 255, .2);
+    outline: none;
+}
+
+.dsn-picker__search {
+    flex: 1 1 120px;
+    min-width: 120px;
+    border: 0;
+    outline: 0;
+    padding: 4px 6px;
+    background: transparent;
+    font-size: 13px;
+    color: #1d2327;
+}
+
+.dsn-picker__search::placeholder {
+    color: #8c8f94;
+}
+
+.dsn-picker__dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    max-height: 240px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 4px 0;
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, .08);
+    list-style: none;
+}
+
+.dsn-picker__dropdown[hidden] {
+    display: none;
+}
+
+.dsn-picker__option {
+    padding: 6px 12px;
+    cursor: pointer;
+    color: #1d2327;
+}
+
+.dsn-picker__option:hover,
+.dsn-picker__option.is-active {
+    background: #f0f6fc;
+    color: #0a4b78;
+}
+
+.dsn-picker__option-empty {
+    padding: 8px 12px;
+    color: #646970;
+    font-style: italic;
+}
+
+.dsn-picker__clear {
+    margin-left: auto;
+    background: transparent;
+    border: 0;
+    padding: 2px 6px;
+    color: #646970;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.dsn-picker__clear:hover,
+.dsn-picker__clear:focus {
+    background: #f0f0f1;
+    color: #1d2327;
+    outline: none;
+}
