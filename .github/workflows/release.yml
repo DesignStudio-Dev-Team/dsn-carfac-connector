@@ -18,10 +18,25 @@ jobs:
           set -e
           rm -rf package release-package.zip || true
           mkdir -p package/dsn-woo-powerall-connector
-          # Copy repository contents into package/dsn-woo-powerall-connector but exclude CI, git and dev folders
-          rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='.vscode' --exclude='package' ./ package/dsn-woo-powerall-connector/
+          # Copy repository contents into package/dsn-woo-powerall-connector but exclude CI, git and dev folders.
+          # NOTE: languages/ is intentionally NOT excluded — translation .po/.mo files must ship in the zip.
+          rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='.vscode' --exclude='package' --exclude='.DS_Store' ./ package/dsn-woo-powerall-connector/
           # Zip the packaged plugin folder so the archive root contains the plugin folder only
           (cd package && zip -r ../release-package.zip dsn-woo-powerall-connector)
+
+      - name: Verify languages folder is in the release ZIP
+        run: |
+          set -e
+          echo "Listing languages/ entries inside the release zip:"
+          unzip -l release-package.zip | grep -E 'dsn-woo-powerall-connector/languages/' || {
+            echo "ERROR: languages/ folder missing from release ZIP"
+            exit 1
+          }
+          # Require at least one compiled .mo so translations actually work at runtime.
+          if ! unzip -l release-package.zip | grep -Eq 'dsn-woo-powerall-connector/languages/.+\.mo$'; then
+            echo "ERROR: no .mo files found in languages/ inside the release ZIP"
+            exit 1
+          fi
 
       - name: Create GitHub Release
         id: create_release
