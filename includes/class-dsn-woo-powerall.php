@@ -62,7 +62,25 @@ class DSN_Woo_Powerall {
      * @return void
      */
     public function enqueue_admin_scripts($hook) {
-        if ($hook !== 'toplevel_page_dsn-woo-powerall') {
+        $settings_hook = isset($this->admin_settings->settings_page_hook) ? $this->admin_settings->settings_page_hook : 'toplevel_page_dsn-woo-powerall';
+        $tools_hook    = isset($this->admin_settings->tools_page_hook) ? $this->admin_settings->tools_page_hook : '';
+
+        if ($hook === $settings_hook) {
+            // selectWoo (WooCommerce-bundled Select2 fork) powers the warehouse picker on the settings page.
+            if (wp_script_is('selectWoo', 'registered')) {
+                wp_enqueue_script('selectWoo');
+            }
+            if (wp_style_is('select2', 'registered')) {
+                wp_enqueue_style('select2');
+            }
+            wp_add_inline_script(
+                wp_script_is('selectWoo', 'registered') ? 'selectWoo' : 'jquery',
+                "jQuery(function($){ var \$el = $('#dsn-excluded-warehouses'); if (!\$el.length) return; if (typeof $.fn.selectWoo === 'function') { \$el.selectWoo({ width: '100%', placeholder: \$el.data('placeholder') || '', allowClear: true }); } else if (typeof $.fn.select2 === 'function') { \$el.select2({ width: '100%', placeholder: \$el.data('placeholder') || '', allowClear: true }); } });"
+            );
+            return;
+        }
+
+        if ($tools_hook === '' || $hook !== $tools_hook) {
             return;
         }
 
@@ -96,7 +114,7 @@ class DSN_Woo_Powerall {
             'auto_start' => isset($_GET['start']),
             'progress_url' => add_query_arg(
                 array(
-                    'page' => 'dsn-woo-powerall',
+                    'page' => 'dsn-woo-powerall-tools',
                     'view' => 'sync-progress',
                 ),
                 admin_url('admin.php')
@@ -246,15 +264,25 @@ class DSN_Woo_Powerall {
      * @return void
      */
     private function register_hooks() {
+        add_filter('cron_schedules', array($this, 'add_custom_cron_schedules'));
+
         if (!wp_next_scheduled('dsn_woo_powerall_daily_sync')) {
             wp_schedule_event(time(), 'daily', 'dsn_woo_powerall_daily_sync');
         }
 
-        if (!wp_next_scheduled('dsn_woo_powerall_weekly_clear_logs')) {
-            wp_schedule_event(time(), 'weekly', 'dsn_woo_powerall_weekly_clear_logs');
+        // Migrate away from the older weekly log cleanup cron if it is still scheduled.
+        $legacy_clear_logs = wp_next_scheduled('dsn_woo_powerall_weekly_clear_logs');
+        if ($legacy_clear_logs) {
+            wp_unschedule_event($legacy_clear_logs, 'dsn_woo_powerall_weekly_clear_logs');
+        }
+
+        if (!wp_next_scheduled('dsn_woo_powerall_biweekly_clear_logs')) {
+            wp_schedule_event(time() + DAY_IN_SECONDS, 'dsn_woo_powerall_fortnightly', 'dsn_woo_powerall_biweekly_clear_logs');
         }
 
         add_action('dsn_woo_powerall_daily_sync', array($this->product_sync, 'sync_products'));
+        add_action('dsn_woo_powerall_biweekly_clear_logs', array($this, 'clear_all_logs'));
+        // Back-compat: still run the handler if the legacy hook fires (another cron runner may trigger it once).
         add_action('dsn_woo_powerall_weekly_clear_logs', array($this, 'clear_all_logs'));
 
         add_action('woocommerce_checkout_order_processed', array($this->order_sync, 'handle_new_order'), 10, 1);
@@ -302,7 +330,25 @@ class DSN_Woo_Powerall {
     }
 
     /**
-     * Clear all plugin logs (weekly cron).
+     * Register custom WP-Cron schedules used by this plugin.
+     * Adds a 14-day "fortnightly" interval for the log-cleanup cron.
+     *
+     * @param array $schedules
+     * @return array
+     */
+    public function add_custom_cron_schedules($schedules) {
+        if (!isset($schedules['dsn_woo_powerall_fortnightly'])) {
+            $schedules['dsn_woo_powerall_fortnightly'] = array(
+                'interval' => 14 * DAY_IN_SECONDS,
+                'display'  => __('Every 2 weeks', 'dsn-woo-powerall'),
+            );
+        }
+
+        return $schedules;
+    }
+
+    /**
+     * Clear all plugin logs (runs every 2 weeks via WP-Cron).
      *
      * @return void
      */

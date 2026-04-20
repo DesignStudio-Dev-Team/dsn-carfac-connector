@@ -10,6 +10,16 @@ class Admin_Settings {
     private $logger;
 
     /**
+     * Admin page hook suffixes (captured from add_menu_page / add_submenu_page return values).
+     * Used by the main plugin class to scope admin asset enqueues to this plugin's screens.
+     *
+     * @var string
+     */
+    public $settings_page_hook = '';
+    public $tools_page_hook = '';
+    public $logs_page_hook = '';
+
+    /**
      * Constructor
      */
     public function __construct() {
@@ -23,7 +33,7 @@ class Admin_Settings {
      * @return void
      */
     public function add_admin_menu() {
-        add_menu_page(
+        $this->settings_page_hook = add_menu_page(
             __('DSN Woo To Powerall', 'dsn-woo-powerall'),
             __('DSN Woo To Powerall', 'dsn-woo-powerall'),
             'manage_options',
@@ -31,6 +41,33 @@ class Admin_Settings {
             array($this, 'render_settings_page'),
             'dashicons-update',
             56
+        );
+
+        add_submenu_page(
+            'dsn-woo-powerall',
+            __('Settings', 'dsn-woo-powerall'),
+            __('Settings', 'dsn-woo-powerall'),
+            'manage_options',
+            'dsn-woo-powerall',
+            array($this, 'render_settings_page')
+        );
+
+        $this->tools_page_hook = add_submenu_page(
+            'dsn-woo-powerall',
+            __('Tools', 'dsn-woo-powerall'),
+            __('Tools', 'dsn-woo-powerall'),
+            'manage_options',
+            'dsn-woo-powerall-tools',
+            array($this, 'render_tools_page')
+        );
+
+        $this->logs_page_hook = add_submenu_page(
+            'dsn-woo-powerall',
+            __('Logs', 'dsn-woo-powerall'),
+            __('Logs', 'dsn-woo-powerall'),
+            'manage_options',
+            'dsn-woo-powerall-logs',
+            array($this, 'render_log_page')
         );
     }
 
@@ -47,6 +84,10 @@ class Admin_Settings {
         register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_stock_tracking_mode', array(
             'sanitize_callback' => array($this, 'sanitize_stock_tracking_mode'),
             'default' => Stock_Helper::DEFAULT_MODE,
+        ));
+        register_setting('dsn_woo_powerall_settings', Stock_Helper::EXCLUDED_WAREHOUSES_OPTION, array(
+            'sanitize_callback' => array($this, 'sanitize_excluded_warehouses'),
+            'default' => array(),
         ));
         register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_frontend_stock_enabled');
         register_setting('dsn_woo_powerall_settings', 'dsn_woo_powerall_frontend_stock_display', array(
@@ -114,6 +155,14 @@ class Admin_Settings {
         );
 
         add_settings_field(
+            Stock_Helper::EXCLUDED_WAREHOUSES_OPTION,
+            __('Locations to Ignore', 'dsn-woo-powerall'),
+            array($this, 'render_warehouse_inclusion_field'),
+            'dsn-woo-powerall',
+            'dsn_woo_powerall_main_section'
+        );
+
+        add_settings_field(
             'dsn_woo_powerall_frontend_stock_enabled',
             __('Show Stock on Frontend', 'dsn-woo-powerall'),
             array($this, 'render_frontend_stock_enabled_field'),
@@ -164,16 +213,6 @@ class Admin_Settings {
             return;
         }
 
-        if (
-            isset($_POST['dsn_woo_powerall_manual_sync']) &&
-            check_admin_referer('dsn_woo_powerall_manual_sync', 'dsn_woo_powerall_sync_nonce')
-        ) {
-            wp_safe_redirect($this->get_sync_progress_url(true));
-            exit;
-        }
-
-        $view = isset($_GET['view']) ? sanitize_key(wp_unslash($_GET['view'])) : '';
-
         if (isset($_GET['settings-updated'])) {
             add_settings_error(
                 'dsn_woo_powerall_messages',
@@ -183,17 +222,41 @@ class Admin_Settings {
             );
         }
 
-        if (isset($_POST['clear_log']) && check_admin_referer('dsn_woo_powerall_clear_log')) {
-            $this->logger->clear_log();
-            delete_transient('dsn_github_latest_release_DesignStudio-Dev-Team_dsn-woo-powerall-connector');
+        settings_errors('dsn_woo_powerall_messages');
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e('DSN Woo To Powerall — Settings', 'dsn-woo-powerall'); ?></h1>
+            <?php $this->render_nav_tabs('settings'); ?>
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('dsn_woo_powerall_settings');
+                do_settings_sections('dsn-woo-powerall');
+                submit_button(__('Save Settings', 'dsn-woo-powerall'));
+                ?>
+            </form>
+        </div>
+        <?php
+    }
 
-            add_settings_error(
-                'dsn_woo_powerall_messages',
-                'dsn_woo_powerall_message',
-                __('Log cleared and update cache reset successfully.', 'dsn-woo-powerall'),
-                'updated'
-            );
+    /**
+     * Render the dedicated Tools page (manual sync, warehouse rescan, connection test, cleanup).
+     *
+     * @return void
+     */
+    public function render_tools_page() {
+        if (!current_user_can('manage_options')) {
+            return;
         }
+
+        if (
+            isset($_POST['dsn_woo_powerall_manual_sync']) &&
+            check_admin_referer('dsn_woo_powerall_manual_sync', 'dsn_woo_powerall_sync_nonce')
+        ) {
+            wp_safe_redirect($this->get_sync_progress_url(true));
+            exit;
+        }
+
+        $view = isset($_GET['view']) ? sanitize_key(wp_unslash($_GET['view'])) : '';
 
         if (
             isset($_POST['dsn_woo_powerall_cleanup']) &&
@@ -223,6 +286,23 @@ class Admin_Settings {
             }
         }
 
+        if (
+            isset($_POST['dsn_woo_powerall_scan_warehouses']) &&
+            check_admin_referer('dsn_woo_powerall_scan_warehouses', 'dsn_woo_powerall_scan_warehouses_nonce')
+        ) {
+            $count = Stock_Helper::scan_known_warehouses();
+            add_settings_error(
+                'dsn_woo_powerall_messages',
+                'dsn_woo_powerall_message',
+                sprintf(
+                    /* translators: %d: number of warehouse locations discovered */
+                    __('Warehouse list refreshed. Found %d location(s).', 'dsn-woo-powerall'),
+                    $count
+                ),
+                'updated'
+            );
+        }
+
         if (isset($_POST['run_tests']) && check_admin_referer('dsn_woo_powerall_run_tests')) {
             $test = new Test();
             $test->run_all_tests();
@@ -243,16 +323,8 @@ class Admin_Settings {
 
         ?>
         <div class="wrap">
-            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-            <form action="options.php" method="post">
-                <?php
-                settings_fields('dsn_woo_powerall_settings');
-                do_settings_sections('dsn-woo-powerall');
-                submit_button(__('Save Settings', 'dsn-woo-powerall'));
-                ?>
-            </form>
-
-            <hr>
+            <h1><?php esc_html_e('DSN Woo To Powerall — Tools', 'dsn-woo-powerall'); ?></h1>
+            <?php $this->render_nav_tabs('tools'); ?>
 
             <h2><?php esc_html_e('Manual Sync', 'dsn-woo-powerall'); ?></h2>
             <p><?php esc_html_e('Open the progress screen to start a manual product sync. The sync runs in smaller batches so you can watch progress and reduce timeout risk on slower hosting.', 'dsn-woo-powerall'); ?></p>
@@ -260,6 +332,15 @@ class Admin_Settings {
                 <?php wp_nonce_field('dsn_woo_powerall_manual_sync', 'dsn_woo_powerall_sync_nonce'); ?>
                 <input type="submit" name="dsn_woo_powerall_manual_sync" class="button button-primary" value="<?php esc_attr_e('Open Product Sync Progress', 'dsn-woo-powerall'); ?>">
                 <a href="<?php echo esc_url($this->get_sync_progress_url(false)); ?>" class="button"><?php esc_html_e('View Current Progress', 'dsn-woo-powerall'); ?></a>
+            </form>
+
+            <hr>
+
+            <h2><?php esc_html_e('Refresh Warehouse List', 'dsn-woo-powerall'); ?></h2>
+            <p><?php esc_html_e('Rescan existing product data to rebuild the list of warehouse locations available in the settings. The list is also updated automatically during each sync.', 'dsn-woo-powerall'); ?></p>
+            <form method="post" action="">
+                <?php wp_nonce_field('dsn_woo_powerall_scan_warehouses', 'dsn_woo_powerall_scan_warehouses_nonce'); ?>
+                <input type="submit" name="dsn_woo_powerall_scan_warehouses" class="button button-secondary" value="<?php esc_attr_e('Refresh warehouse list', 'dsn-woo-powerall'); ?>">
             </form>
 
             <hr>
@@ -279,8 +360,37 @@ class Admin_Settings {
                 <?php wp_nonce_field('dsn_woo_powerall_cleanup_sale_prices', 'dsn_woo_powerall_cleanup_nonce'); ?>
                 <input type="submit" name="dsn_woo_powerall_cleanup" class="button button-secondary" value="<?php esc_attr_e('Cleanup sale prices', 'dsn-woo-powerall'); ?>">
             </form>
+        </div>
+        <?php
+    }
 
-            <h2><?php esc_html_e('Log Viewer', 'dsn-woo-powerall'); ?></h2>
+    /**
+     * Render the dedicated Log Viewer page.
+     *
+     * @return void
+     */
+    public function render_log_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        if (isset($_POST['clear_log']) && check_admin_referer('dsn_woo_powerall_clear_log')) {
+            $this->logger->clear_log();
+            delete_transient('dsn_github_latest_release_DesignStudio-Dev-Team_dsn-woo-powerall-connector');
+
+            add_settings_error(
+                'dsn_woo_powerall_messages',
+                'dsn_woo_powerall_message',
+                __('Log cleared and update cache reset successfully.', 'dsn-woo-powerall'),
+                'updated'
+            );
+        }
+
+        settings_errors('dsn_woo_powerall_messages');
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e('DSN Woo To Powerall — Logs', 'dsn-woo-powerall'); ?></h1>
+            <?php $this->render_nav_tabs('logs'); ?>
             <p><?php esc_html_e('View the latest API requests and responses.', 'dsn-woo-powerall'); ?></p>
 
             <form method="post" action="">
@@ -289,10 +399,19 @@ class Admin_Settings {
             </form>
 
             <div class="log-viewer" style="margin-top: 20px; background: #fff; padding: 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
-                <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 500px; overflow-y: auto;"><?php echo esc_html($this->get_log_contents()); ?></pre>
+                <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;"><?php echo esc_html($this->get_log_contents()); ?></pre>
             </div>
         </div>
         <?php
+    }
+
+    /**
+     * Get the Log Viewer page URL.
+     *
+     * @return string
+     */
+    private function get_log_page_url() {
+        return add_query_arg(array('page' => 'dsn-woo-powerall-logs'), admin_url('admin.php'));
     }
 
     /**
@@ -512,6 +631,65 @@ class Admin_Settings {
     }
 
     /**
+     * Render the searchable multi-select (pill) for warehouse locations to ignore.
+     *
+     * @return void
+     */
+    public function render_warehouse_inclusion_field() {
+        $known       = Stock_Helper::get_known_warehouses();
+        $excluded    = Stock_Helper::get_excluded_warehouses();
+        $option      = Stock_Helper::EXCLUDED_WAREHOUSES_OPTION;
+        $placeholder = __('Search locations to ignore…', 'dsn-woo-powerall');
+        ?>
+        <input type="hidden" name="<?php echo esc_attr($option); ?>[__present]" value="1">
+        <?php if (empty($known)) : ?>
+            <p><em><?php esc_html_e('No warehouse locations discovered yet. Run a sync or click "Refresh warehouse list" below to scan existing product data.', 'dsn-woo-powerall'); ?></em></p>
+        <?php else : ?>
+            <select id="dsn-excluded-warehouses"
+                    name="<?php echo esc_attr($option); ?>[excluded][]"
+                    multiple="multiple"
+                    class="regular-text"
+                    style="width:100%; max-width:600px;"
+                    data-placeholder="<?php echo esc_attr($placeholder); ?>">
+                <?php foreach ($known as $name) : ?>
+                    <option value="<?php echo esc_attr($name); ?>" <?php selected(in_array($name, $excluded, true)); ?>>
+                        <?php echo esc_html($name); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        <?php endif; ?>
+        <p class="description">
+            <?php esc_html_e('Select the Powerall locations you want to ignore. Selected locations are removed from the WooCommerce stock total and hidden on the per-warehouse frontend display. Locations are identified by their Powerall Description. Use the "Refresh warehouse list" button below to rescan after new locations appear.', 'dsn-woo-powerall'); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Sanitize the excluded-warehouses submission.
+     * Only names that match a currently-known warehouse are accepted.
+     *
+     * @param mixed $value
+     * @return array<int, string>
+     */
+    public function sanitize_excluded_warehouses($value) {
+        if (!is_array($value) || !isset($value['__present'])) {
+            return Stock_Helper::get_excluded_warehouses();
+        }
+
+        $excluded = isset($value['excluded']) && is_array($value['excluded'])
+            ? array_values(array_unique(array_filter(array_map(function ($v) {
+                return trim((string) $v);
+            }, $value['excluded']), function ($v) {
+                return $v !== '';
+            })))
+            : array();
+
+        $known = Stock_Helper::get_known_warehouses();
+
+        return array_values(array_intersect($known, $excluded));
+    }
+
+    /**
      * Sanitize frontend stock display mode.
      *
      * @param string $value
@@ -576,13 +754,13 @@ class Admin_Settings {
         ?>
         <div class="wrap">
             <h1><?php esc_html_e('Product Sync Progress', 'dsn-woo-powerall'); ?></h1>
+            <?php $this->render_nav_tabs('tools'); ?>
             <p><?php echo esc_html(sprintf(__('Products are processed in batches of %1$d with a %2$d second pause between batches to reduce timeout risk.', 'dsn-woo-powerall'), Product_Sync::get_batch_size(), Product_Sync::get_batch_delay_seconds())); ?></p>
 
             <div id="dsn-woo-powerall-sync-app" data-auto-start="<?php echo esc_attr($auto_start); ?>" style="max-width: 920px;">
                 <div style="background:#fff; border:1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04); padding:24px;">
                     <p>
                         <button type="button" class="button button-primary" id="dsn-woo-powerall-start-sync"><?php esc_html_e('Start Sync', 'dsn-woo-powerall'); ?></button>
-                        <a href="<?php echo esc_url($this->get_settings_page_url()); ?>" class="button"><?php esc_html_e('Back to Settings', 'dsn-woo-powerall'); ?></a>
                     </p>
 
                     <div style="background:#f0f0f1; width:100%; height:18px; border-radius:4px; overflow:hidden;">
@@ -680,7 +858,7 @@ class Admin_Settings {
      */
     private function get_sync_progress_url($auto_start = false) {
         $args = array(
-            'page' => 'dsn-woo-powerall',
+            'page' => 'dsn-woo-powerall-tools',
             'view' => 'sync-progress',
         );
 
@@ -689,5 +867,48 @@ class Admin_Settings {
         }
 
         return add_query_arg($args, admin_url('admin.php'));
+    }
+
+    /**
+     * Get the Tools page URL.
+     *
+     * @return string
+     */
+    private function get_tools_page_url() {
+        return add_query_arg(array('page' => 'dsn-woo-powerall-tools'), admin_url('admin.php'));
+    }
+
+    /**
+     * Render the WP-style nav tab bar shared across the plugin's admin screens.
+     *
+     * @param string $active One of: settings, tools, logs.
+     * @return void
+     */
+    private function render_nav_tabs($active) {
+        $tabs = array(
+            'settings' => array(
+                'label' => __('Settings', 'dsn-woo-powerall'),
+                'url'   => $this->get_settings_page_url(),
+            ),
+            'tools'    => array(
+                'label' => __('Tools', 'dsn-woo-powerall'),
+                'url'   => $this->get_tools_page_url(),
+            ),
+            'logs'     => array(
+                'label' => __('Logs', 'dsn-woo-powerall'),
+                'url'   => $this->get_log_page_url(),
+            ),
+        );
+        ?>
+        <h2 class="nav-tab-wrapper">
+            <?php foreach ($tabs as $key => $tab) :
+                $classes = 'nav-tab' . ($active === $key ? ' nav-tab-active' : '');
+                ?>
+                <a href="<?php echo esc_url($tab['url']); ?>" class="<?php echo esc_attr($classes); ?>">
+                    <?php echo esc_html($tab['label']); ?>
+                </a>
+            <?php endforeach; ?>
+        </h2>
+        <?php
     }
 }

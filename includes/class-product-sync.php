@@ -268,6 +268,7 @@ class Product_Sync {
         // regardless of whether price/stock values changed this run.
         if (!empty($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])) {
             update_post_meta($product_id, '_powerall_stock_warehouses', wp_json_encode($product_data['StockPerWarehouse']));
+            Stock_Helper::register_known_warehouses($product_data['StockPerWarehouse']);
         }
 
         $product = wc_get_product($product_id);

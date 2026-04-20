@@ -175,12 +175,19 @@ class Stock_Display {
         $locations = array();
 
         foreach ( $warehouses as $wh ) {
+            if ( ! is_array( $wh ) || ! Stock_Helper::is_warehouse_included( $wh ) ) {
+                continue;
+            }
             $qty = $this->warehouse_stock_for_mode( $wh, $mode );
             $locations[] = array(
                 'name'      => $this->format_warehouse_name( $wh ),
                 'stock'     => $qty,
                 'backorder' => $product ? $this->backorder_label( $product, (int) $qty ) : '',
             );
+        }
+
+        if ( empty( $locations ) ) {
+            return $this->render_combined( $product_id );
         }
 
         $preview   = array_slice( $locations, 0, self::PREVIEW_LIMIT );
