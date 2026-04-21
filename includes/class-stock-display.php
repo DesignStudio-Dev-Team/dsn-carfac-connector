@@ -158,16 +158,21 @@ class Stock_Display {
     private function render_per_warehouse( int $product_id ): string {
         // Always read warehouse meta from the original/source product — WPML
         // translated products don't have this meta since sync writes to the original.
-        $source_id = $this->get_source_product_id( $product_id );
-        $raw       = get_post_meta( $source_id, self::META_KEY, true );
+        $source_id  = $this->get_source_product_id( $product_id );
+        $warehouses = $this->load_warehouse_data( $source_id );
 
-        if ( ! $raw ) {
-            return $this->render_combined( $product_id );
-        }
-
-        $warehouses = json_decode( $raw, true );
-        if ( ! is_array( $warehouses ) || empty( $warehouses ) ) {
-            return $this->render_combined( $product_id );
+        if ( empty( $warehouses ) ) {
+            // Debug breadcrumb: explains to developers inspecting the page source
+            // why a product that should show per-warehouse is falling back to the
+            // combined total. Most common cause: meta never written because the
+            // product was either (a) not matched by SKU during sync, (b) came back
+            // from Powerall with an empty StockPerWarehouse, or (c) is a variable
+            // parent whose variations also have no warehouse meta yet.
+            return $this->render_fallback_combined(
+                $product_id,
+                'no-warehouse-meta',
+                $source_id
+            );
         }
 
         $product   = wc_get_product( $product_id );
@@ -187,7 +192,12 @@ class Stock_Display {
         }
 
         if ( empty( $locations ) ) {
-            return $this->render_combined( $product_id );
+            // Every warehouse in the meta was filtered out by "Locations to Ignore".
+            return $this->render_fallback_combined(
+                $product_id,
+                'all-warehouses-excluded',
+                $source_id
+            );
         }
 
         $preview   = array_slice( $locations, 0, self::PREVIEW_LIMIT );
@@ -278,6 +288,101 @@ class Stock_Display {
             esc_html__( 'Available in stock', 'dsn-woo-powerall' ),
             $backorder
         );
+    }
+
+    /**
+     * Load the raw StockPerWarehouse array for a product.
+     *
+     * Resolution order:
+     *  1. Direct `_powerall_stock_warehouses` meta on the product.
+     *  2. If the product is a variable parent, aggregate the meta across all its
+     *     variations. Sync matches Powerall records by SKU, and variable parents
+     *     rarely have a SKU, so their warehouse meta typically lives on the
+     *     variations. We sum EconomicalStock / FreeStock / ShelfStock per
+     *     warehouse (keyed by the Description returned from Powerall).
+     *
+     * @param int $product_id Post ID to resolve meta for.
+     * @return array<int, array<string, mixed>> Empty array when nothing was found.
+     */
+    private function load_warehouse_data( int $product_id ): array {
+        $raw = get_post_meta( $product_id, self::META_KEY, true );
+        if ( $raw ) {
+            $decoded = json_decode( $raw, true );
+            if ( is_array( $decoded ) && ! empty( $decoded ) ) {
+                return $decoded;
+            }
+        }
+
+        // Variable parent: try to aggregate from variations.
+        $product = wc_get_product( $product_id );
+        if ( ! $product || ! $product->is_type( 'variable' ) ) {
+            return array();
+        }
+
+        $variation_ids = $product->get_children();
+        if ( empty( $variation_ids ) ) {
+            return array();
+        }
+
+        $buckets = array(); // keyed by warehouse Description
+
+        foreach ( $variation_ids as $vid ) {
+            $vraw = get_post_meta( (int) $vid, self::META_KEY, true );
+            if ( ! $vraw ) {
+                continue;
+            }
+            $decoded = json_decode( $vraw, true );
+            if ( ! is_array( $decoded ) ) {
+                continue;
+            }
+            foreach ( $decoded as $wh ) {
+                if ( ! is_array( $wh ) ) {
+                    continue;
+                }
+                $key = Stock_Helper::get_warehouse_name( $wh );
+                if ( $key === '' ) {
+                    continue;
+                }
+                if ( ! isset( $buckets[ $key ] ) ) {
+                    // Preserve the first entry's original shape so downstream
+                    // helpers (format_warehouse_name, is_warehouse_included)
+                    // see the same keys they would get on a simple product.
+                    $buckets[ $key ] = array(
+                        'Warehouse'       => $wh['Warehouse'] ?? array(),
+                        'WarehouseName'   => $wh['WarehouseName'] ?? null,
+                        'WarehouseCode'   => $wh['WarehouseCode'] ?? null,
+                        'EconomicalStock' => 0,
+                        'FreeStock'       => 0,
+                        'ShelfStock'      => 0,
+                    );
+                }
+                $buckets[ $key ]['EconomicalStock'] += floatval( $wh['EconomicalStock'] ?? 0 );
+                $buckets[ $key ]['FreeStock']       += floatval( $wh['FreeStock'] ?? 0 );
+                $buckets[ $key ]['ShelfStock']      += floatval( $wh['ShelfStock'] ?? 0 );
+            }
+        }
+
+        return array_values( $buckets );
+    }
+
+    /**
+     * Render the combined view, tagged with an HTML comment explaining *why*
+     * the per-warehouse renderer couldn't show its list. Visible in page
+     * source, invisible to shoppers.
+     *
+     * @param int    $product_id The product being rendered.
+     * @param string $reason     Short slug, e.g. "no-warehouse-meta".
+     * @param int    $source_id  The (WPML-resolved) source product id consulted.
+     * @return string
+     */
+    private function render_fallback_combined( int $product_id, string $reason, int $source_id ): string {
+        $comment = sprintf(
+            '<!-- dsn-stock: per-warehouse fallback (%s) product=%d source=%d -->',
+            $reason,
+            $product_id,
+            $source_id
+        );
+        return $comment . $this->render_combined( $product_id );
     }
 
     // -------------------------------------------------------------------------
