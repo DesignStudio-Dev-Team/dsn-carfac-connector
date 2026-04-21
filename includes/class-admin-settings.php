@@ -24,6 +24,7 @@ class Admin_Settings {
      */
     public function __construct() {
         add_action('admin_init', array($this, 'register_settings'));
+        add_action('update_option_' . Stock_Helper::EXCLUDED_WAREHOUSES_OPTION, array($this, 'recalculate_stock_after_exclusion_change'), 10, 2);
         $this->logger = new Logger();
     }
 
@@ -86,6 +87,7 @@ class Admin_Settings {
             'default' => Stock_Helper::DEFAULT_MODE,
         ));
         register_setting('dsn_woo_powerall_settings', Stock_Helper::EXCLUDED_WAREHOUSES_OPTION, array(
+            'type' => 'array',
             'sanitize_callback' => array($this, 'sanitize_excluded_warehouses'),
             'default' => array(),
         ));
@@ -314,6 +316,35 @@ class Admin_Settings {
             );
         }
 
+        $audit_report = null;
+        if (
+            isset($_POST['dsn_woo_powerall_audit_matches']) &&
+            check_admin_referer('dsn_woo_powerall_audit_matches', 'dsn_woo_powerall_audit_matches_nonce')
+        ) {
+            $audit_report = $this->run_sku_match_audit();
+            if (is_wp_error($audit_report)) {
+                add_settings_error(
+                    'dsn_woo_powerall_messages',
+                    'dsn_woo_powerall_message',
+                    $audit_report->get_error_message(),
+                    'error'
+                );
+                $audit_report = null;
+            } else {
+                add_settings_error(
+                    'dsn_woo_powerall_messages',
+                    'dsn_woo_powerall_message',
+                    sprintf(
+                        /* translators: 1: matched count, 2: total Powerall records */
+                        __('SKU audit complete. %1$d of %2$d Powerall records matched a WooCommerce product.', 'dsn-woo-powerall'),
+                        $audit_report['matched_count'],
+                        $audit_report['total']
+                    ),
+                    'updated'
+                );
+            }
+        }
+
         settings_errors('dsn_woo_powerall_messages');
 
         if ($view === 'sync-progress') {
@@ -360,6 +391,184 @@ class Admin_Settings {
                 <?php wp_nonce_field('dsn_woo_powerall_cleanup_sale_prices', 'dsn_woo_powerall_cleanup_nonce'); ?>
                 <input type="submit" name="dsn_woo_powerall_cleanup" class="button button-secondary" value="<?php esc_attr_e('Cleanup sale prices', 'dsn-woo-powerall'); ?>">
             </form>
+
+            <hr>
+
+            <h2><?php esc_html_e('Audit SKU Matches', 'dsn-woo-powerall'); ?></h2>
+            <p><?php esc_html_e('Fetch every product from Powerall and report which records fail to match a WooCommerce SKU. Match priority: ProductCode → EanCode.', 'dsn-woo-powerall'); ?></p>
+            <form method="post" action="">
+                <?php wp_nonce_field('dsn_woo_powerall_audit_matches', 'dsn_woo_powerall_audit_matches_nonce'); ?>
+                <input type="submit" name="dsn_woo_powerall_audit_matches" class="button button-secondary" value="<?php esc_attr_e('Run SKU audit', 'dsn-woo-powerall'); ?>">
+            </form>
+
+            <?php if (is_array($audit_report)) : ?>
+                <?php $this->render_audit_report($audit_report); ?>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * Fetch every product from Powerall and compare against WooCommerce SKUs.
+     * Returns a report array, or WP_Error on API failure.
+     *
+     * @return array{total:int, matched_count:int, matched_by_product_code:int, matched_by_ean_code:int, unmatched:array, duplicates:array}|\WP_Error
+     */
+    private function run_sku_match_audit() {
+        require_once __DIR__ . '/class-api-handler.php';
+        $api_handler = new API_Handler();
+        $products    = $api_handler->get_products();
+
+        if (is_wp_error($products)) {
+            return $products;
+        }
+        if (!is_array($products)) {
+            return new \WP_Error('invalid_response', __('Powerall returned an unexpected response.', 'dsn-woo-powerall'));
+        }
+
+        $report = array(
+            'total'                   => count($products),
+            'matched_count'           => 0,
+            'matched_by_product_code' => 0,
+            'matched_by_ean_code'     => 0,
+            'missing_both_codes'      => 0,
+            'unmatched'               => array(),
+            'duplicates'              => array(),
+        );
+
+        foreach ($products as $record) {
+            if (!is_array($record)) {
+                continue;
+            }
+
+            $product_code = isset($record['ProductCode']) ? trim((string) $record['ProductCode']) : '';
+            $ean_code     = isset($record['EanCode']) ? trim((string) $record['EanCode']) : '';
+            $name         = isset($record['Description1']) ? (string) $record['Description1'] : '';
+
+            if ($product_code === '' && $ean_code === '') {
+                $report['missing_both_codes']++;
+                $report['unmatched'][] = array(
+                    'product_code' => '',
+                    'ean_code'     => '',
+                    'name'         => $name,
+                    'reason'       => __('Powerall record has no ProductCode and no EanCode', 'dsn-woo-powerall'),
+                );
+                continue;
+            }
+
+            $matched_by = '';
+            $product_id = 0;
+
+            if ($product_code !== '') {
+                $id = $this->lookup_woo_id_by_sku($product_code);
+                if ($id > 0) {
+                    $matched_by = 'ProductCode';
+                    $product_id = $id;
+                    $report['matched_by_product_code']++;
+                }
+            }
+
+            if (!$product_id && $ean_code !== '' && $ean_code !== $product_code) {
+                $id = $this->lookup_woo_id_by_sku($ean_code);
+                if ($id > 0) {
+                    $matched_by = 'EanCode';
+                    $product_id = $id;
+                    $report['matched_by_ean_code']++;
+                }
+            }
+
+            if ($product_id) {
+                $report['matched_count']++;
+                continue;
+            }
+
+            $report['unmatched'][] = array(
+                'product_code' => $product_code,
+                'ean_code'     => $ean_code,
+                'name'         => $name,
+                'reason'       => __('No WooCommerce product with a matching SKU', 'dsn-woo-powerall'),
+            );
+        }
+
+        return $report;
+    }
+
+    /**
+     * Thin wrapper around wc_get_product_id_by_sku with a postmeta fallback so
+     * the audit works even if WooCommerce helpers aren't loaded yet.
+     *
+     * @param string $sku
+     * @return int
+     */
+    private function lookup_woo_id_by_sku($sku) {
+        $sku = trim((string) $sku);
+        if ($sku === '') {
+            return 0;
+        }
+
+        if (function_exists('wc_get_product_id_by_sku')) {
+            $id = (int) wc_get_product_id_by_sku($sku);
+            if ($id > 0) {
+                return $id;
+            }
+        }
+
+        global $wpdb;
+        $row = $wpdb->get_var($wpdb->prepare(
+            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_sku' AND meta_value = %s LIMIT 1",
+            $sku
+        ));
+
+        return $row ? (int) $row : 0;
+    }
+
+    /**
+     * Render the SKU match audit report beneath the Tools form.
+     *
+     * @param array $report
+     * @return void
+     */
+    private function render_audit_report(array $report): void {
+        $preview = array_slice($report['unmatched'], 0, 100);
+        $extra   = max(0, count($report['unmatched']) - count($preview));
+        ?>
+        <div style="margin-top: 20px; background: #fff; padding: 16px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+            <h3 style="margin-top: 0;"><?php esc_html_e('Audit results', 'dsn-woo-powerall'); ?></h3>
+            <ul style="margin: 0 0 12px 18px;">
+                <li><?php printf(esc_html__('Total Powerall records: %d', 'dsn-woo-powerall'), (int) $report['total']); ?></li>
+                <li><?php printf(esc_html__('Matched via ProductCode: %d', 'dsn-woo-powerall'), (int) $report['matched_by_product_code']); ?></li>
+                <li><?php printf(esc_html__('Matched via EanCode: %d', 'dsn-woo-powerall'), (int) $report['matched_by_ean_code']); ?></li>
+                <li><?php printf(esc_html__('Missing both codes: %d', 'dsn-woo-powerall'), (int) $report['missing_both_codes']); ?></li>
+                <li><strong><?php printf(esc_html__('Unmatched: %d', 'dsn-woo-powerall'), (int) count($report['unmatched'])); ?></strong></li>
+            </ul>
+
+            <?php if (empty($preview)) : ?>
+                <p><em><?php esc_html_e('Every Powerall record found a matching WooCommerce SKU.', 'dsn-woo-powerall'); ?></em></p>
+            <?php else : ?>
+                <table class="widefat striped">
+                    <thead>
+                        <tr>
+                            <th><?php esc_html_e('ProductCode', 'dsn-woo-powerall'); ?></th>
+                            <th><?php esc_html_e('EanCode', 'dsn-woo-powerall'); ?></th>
+                            <th><?php esc_html_e('Name', 'dsn-woo-powerall'); ?></th>
+                            <th><?php esc_html_e('Reason', 'dsn-woo-powerall'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($preview as $row) : ?>
+                            <tr>
+                                <td><code><?php echo esc_html($row['product_code'] !== '' ? $row['product_code'] : '—'); ?></code></td>
+                                <td><code><?php echo esc_html($row['ean_code'] !== '' ? $row['ean_code'] : '—'); ?></code></td>
+                                <td><?php echo esc_html($row['name']); ?></td>
+                                <td><?php echo esc_html($row['reason']); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php if ($extra > 0) : ?>
+                    <p><em><?php printf(esc_html__('Showing first %1$d of %2$d unmatched records. Remaining %3$d hidden — see plugin log for full detail.', 'dsn-woo-powerall'), count($preview), (int) count($report['unmatched']), $extra); ?></em></p>
+                <?php endif; ?>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -673,10 +882,27 @@ class Admin_Settings {
      * @return array<int, string>
      */
     public function sanitize_excluded_warehouses($value) {
-        if (!is_array($value) || !isset($value['__present'])) {
+        // When no form sentinel is present (e.g. REST or programmatic update with
+        // a plain array), accept a flat array of warehouse name strings directly.
+        if (is_array($value) && !isset($value['__present'])) {
+            // If every element is a string it is already a flat exclusion list.
+            $all_strings = array_reduce($value, function ($carry, $item) {
+                return $carry && is_string($item);
+            }, true);
+            if ($all_strings) {
+                return array_values(array_unique(array_filter(array_map('trim', $value), function ($v) {
+                    return $v !== '';
+                })));
+            }
+            // Not a flat list and no sentinel — keep previous value.
             return Stock_Helper::get_excluded_warehouses();
         }
 
+        if (!is_array($value)) {
+            return Stock_Helper::get_excluded_warehouses();
+        }
+
+        // Standard form POST: $value = ['__present' => '1', 'excluded' => [...]]
         $excluded = isset($value['excluded']) && is_array($value['excluded'])
             ? array_values(array_unique(array_filter(array_map(function ($v) {
                 return trim((string) $v);
@@ -685,9 +911,9 @@ class Admin_Settings {
             })))
             : array();
 
-        $known = Stock_Helper::get_known_warehouses();
+        $this->logger->info('Saving excluded warehouses: ' . wp_json_encode($excluded));
 
-        return array_values(array_intersect($known, $excluded));
+        return $excluded;
     }
 
     /**
@@ -911,5 +1137,96 @@ class Admin_Settings {
             <?php endforeach; ?>
         </h2>
         <?php
+    }
+
+    /**
+     * Recalculate WooCommerce stock for every product that has Powerall warehouse
+     * data whenever the excluded-warehouses list is changed.
+     *
+     * Fires on `update_option_{option}` so it runs automatically after the
+     * settings page save.
+     *
+     * @param array $old_value Previous exclusion list.
+     * @param array $new_value Updated exclusion list.
+     * @return void
+     */
+    public function recalculate_stock_after_exclusion_change($old_value, $new_value) {
+        // Normalize both to arrays for a reliable comparison.
+        $old = is_array($old_value) ? $old_value : array();
+        $new = is_array($new_value) ? $new_value : array();
+
+        sort($old);
+        sort($new);
+
+        if ($old === $new) {
+            return;
+        }
+
+        $this->logger->info('Excluded warehouses changed — recalculating product stock.');
+
+        global $wpdb;
+
+        $rows = $wpdb->get_results(
+            "SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_powerall_stock_warehouses'"
+        );
+
+        if (empty($rows)) {
+            $this->logger->info('No products with warehouse data found. Nothing to recalculate.');
+            return;
+        }
+
+        $updated = 0;
+
+        foreach ($rows as $row) {
+            $product_id = (int) $row->post_id;
+            $warehouses = json_decode($row->meta_value, true);
+
+            if (!is_array($warehouses) || empty($warehouses)) {
+                continue;
+            }
+
+            $new_stock = Stock_Helper::format_stock_quantity(
+                Stock_Helper::calculate_total_stock($warehouses)
+            );
+            $new_stock_status = floatval($new_stock) > 0 ? 'instock' : 'outofstock';
+
+            // Use the WooCommerce product API so the inventory tab, HPOS,
+            // and all WC caches are properly updated.
+            $product = wc_get_product($product_id);
+            if (!$product) {
+                continue;
+            }
+
+            $product->set_manage_stock(true);
+            $product->set_stock_quantity($new_stock);
+            $product->set_stock_status($new_stock_status);
+            $product->save();
+
+            // Sync stock to WPML translations if present.
+            $trid = apply_filters('wpml_element_trid', null, $product_id, 'post_product');
+            if ($trid) {
+                $translations = apply_filters('wpml_get_element_translations', null, $trid, 'post_product');
+                if (is_array($translations)) {
+                    foreach ($translations as $translation) {
+                        $translated_id = (int) ($translation->element_id ?? 0);
+                        if (!$translated_id || $translated_id === $product_id) {
+                            continue;
+                        }
+                        $translated_product = wc_get_product($translated_id);
+                        if (!$translated_product) {
+                            continue;
+                        }
+                        $translated_product->set_manage_stock(true);
+                        $translated_product->set_stock_quantity($new_stock);
+                        $translated_product->set_stock_status($new_stock_status);
+                        $translated_product->save();
+                    }
+                }
+            }
+
+            $updated++;
+        }
+
+        $this->logger->info(sprintf('Stock recalculation complete. Updated %d product(s).', $updated));
     }
 }

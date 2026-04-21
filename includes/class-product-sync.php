@@ -234,33 +234,51 @@ class Product_Sync {
      * @return array<string, mixed>
      */
     private function sync_single_product($product_data) {
-        $sku = isset($product_data['EanCode']) ? trim((string) $product_data['EanCode']) : '';
+        $ean          = isset($product_data['EanCode']) ? trim((string) $product_data['EanCode']) : '';
+        $product_code = isset($product_data['ProductCode']) ? trim((string) $product_data['ProductCode']) : '';
         $product_name = isset($product_data['Description1']) ? (string) $product_data['Description1'] : '';
-        $product_code = isset($product_data['ProductCode']) ? (string) $product_data['ProductCode'] : '';
+
+        // Lookup order: Powerall ProductCode first, then EanCode as fallback.
+        // Store owners typically use ProductCode as the Woo SKU; EanCode (barcode)
+        // is sometimes empty on Powerall records or mismatched, which previously
+        // caused those products to silently skip during sync.
+        $sku = $product_code !== '' ? $product_code : $ean;
 
         $result = array(
             'status' => 'skipped',
             'sku' => $sku,
             'product_code' => $product_code,
+            'ean_code' => $ean,
             'product_name' => $product_name,
             'product_id' => 0,
             'message' => '',
+            'matched_by' => '',
         );
 
-        if (!$sku) {
-            $result['message'] = 'Product missing SKU, skipping. ' . $product_name;
+        if ($product_code === '' && $ean === '') {
+            $result['message'] = 'Product missing both ProductCode and EanCode, skipping. ' . $product_name;
             $this->logger->warning($result['message']);
             return $result;
         }
 
-        $this->logger->info('Syncing product with SKU: ' . $sku . ' and ProductCode: ' . $product_code);
-        $product_id = $this->get_woo_product_id_by_sku($sku);
+        $this->logger->info('Syncing product. ProductCode: ' . $product_code . ' | EanCode: ' . $ean);
 
-        if (!$product_id) {
-            $result['message'] = 'Product with SKU ' . $sku . ' Product Name: ' . $product_name . ' not found in WooCommerce, skipping.';
+        $match = $this->find_woo_product_for_powerall_record($product_code, $ean);
+        if (!$match) {
+            $result['message'] = sprintf(
+                'No WooCommerce product found for Powerall record (ProductCode: %s, EanCode: %s, Name: %s). Ensure the Woo SKU matches one of these.',
+                $product_code !== '' ? $product_code : '-',
+                $ean !== '' ? $ean : '-',
+                $product_name
+            );
             $this->logger->warning($result['message']);
             return $result;
         }
+
+        $product_id          = $match['product_id'];
+        $result['product_id'] = $product_id;
+        $result['matched_by'] = $match['matched_by'];
+        $result['sku']        = $match['matched_value'];
 
         $result['product_id'] = $product_id;
 
@@ -625,6 +643,19 @@ class Product_Sync {
      * @return int|false
      */
     private function get_woo_product_id_by_sku($sku) {
+        $sku = trim((string) $sku);
+        if ($sku === '') {
+            return false;
+        }
+
+        // Prefer the Woo helper when available — it handles HPOS/modern schemas.
+        if (function_exists('wc_get_product_id_by_sku')) {
+            $id = (int) wc_get_product_id_by_sku($sku);
+            if ($id > 0) {
+                return $id;
+            }
+        }
+
         global $wpdb;
 
         $product_id = $wpdb->get_var($wpdb->prepare(
@@ -636,6 +667,41 @@ class Product_Sync {
         ));
 
         return $product_id ? (int) $product_id : false;
+    }
+
+    /**
+     * Resolve a WooCommerce product for a Powerall record.
+     *
+     * Tries the provided candidates in order, returning on the first match.
+     * ProductCode is checked before EanCode because most stores set Woo SKU
+     * to the Powerall ProductCode; EanCode (barcode) is a secondary fallback
+     * and is sometimes empty on Powerall records.
+     *
+     * @param string $product_code Powerall ProductCode
+     * @param string $ean_code     Powerall EanCode (barcode)
+     * @return array{product_id:int, matched_by:string, matched_value:string}|null
+     */
+    private function find_woo_product_for_powerall_record(string $product_code, string $ean_code): ?array {
+        $candidates = array();
+        if ($product_code !== '') {
+            $candidates[] = array('field' => 'ProductCode', 'value' => $product_code);
+        }
+        if ($ean_code !== '' && $ean_code !== $product_code) {
+            $candidates[] = array('field' => 'EanCode', 'value' => $ean_code);
+        }
+
+        foreach ($candidates as $candidate) {
+            $product_id = $this->get_woo_product_id_by_sku($candidate['value']);
+            if ($product_id) {
+                return array(
+                    'product_id'    => (int) $product_id,
+                    'matched_by'    => $candidate['field'],
+                    'matched_value' => $candidate['value'],
+                );
+            }
+        }
+
+        return null;
     }
 
     /**
