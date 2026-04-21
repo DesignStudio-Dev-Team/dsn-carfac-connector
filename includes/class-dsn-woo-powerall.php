@@ -232,6 +232,7 @@ class DSN_Woo_Powerall {
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-product-sync.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-order-sync.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-stock-display.php';
+        require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-product-meta-box.php';
         require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/class-github-updater.php';
         if (defined('WP_CLI') && WP_CLI) {
             require_once DSN_WOO_POWERALL_PLUGIN_DIR . 'includes/cli-commands.php';
@@ -250,6 +251,9 @@ class DSN_Woo_Powerall {
         $this->product_sync = new Product_Sync($this->api_handler);
         $this->order_sync = new Order_Sync($this->api_handler);
         new Stock_Display();
+        if (is_admin()) {
+            new Product_Meta_Box();
+        }
 
         try {
             new \DSNWooPowerall\GitHub_Updater('DesignStudio-Dev-Team', 'dsn-woo-powerall-connector', DSN_WOO_POWERALL_PLUGIN_FILE, '', $this->logger);

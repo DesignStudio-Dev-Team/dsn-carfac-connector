@@ -373,10 +373,27 @@ class Product_Sync {
 
         $has_changes = $price_changed || $manage_stock_changed || $stock_changed || $stock_status_changed;
 
+        // Build the change map once — reused for both the "no changes" path and
+        // the updated path when persisting the sync snapshot meta below.
+        $changes = array();
+        if ($price_changed) {
+            $changes['price'] = array('from' => $old_price, 'to' => $new_price);
+        }
+        if ($stock_changed) {
+            $changes['stock'] = array('from' => $old_stock, 'to' => $new_stock);
+        }
+        if ($stock_status_changed) {
+            $changes['stock_status'] = array('from' => $old_stock_status, 'to' => $new_stock_status);
+        }
+        if ($manage_stock_changed) {
+            $changes['manage_stock_enabled'] = true;
+        }
+
         if (!$has_changes) {
             $result['status'] = 'synced';
             $result['message'] = 'No changes for product SKU: ' . $sku;
             $this->logger->info($result['message']);
+            $this->record_sync_snapshot($product_id, 'synced', $changes, $product_data, $new_price, $new_stock, $new_stock_status, $result['message']);
             return $result;
         }
 
@@ -395,6 +412,7 @@ class Product_Sync {
             $result['status'] = 'failed';
             $result['message'] = $saved_product_id->get_error_message();
             $this->logger->error('Failed to save product SKU: ' . $sku . ' - ' . $saved_product_id->get_error_message());
+            $this->record_sync_snapshot($product_id, 'failed', $changes, $product_data, $new_price, $new_stock, $new_stock_status, $result['message']);
             return $result;
         }
 
@@ -423,7 +441,79 @@ class Product_Sync {
         ));
         $this->logger->info($result['message']);
 
+        $this->record_sync_snapshot($saved_product_id, 'updated', $changes, $product_data, $new_price, $new_stock, $new_stock_status, $result['message']);
+
         return $result;
+    }
+
+    /**
+     * Persist a compact sync snapshot on the product so the admin meta box
+     * can show "what happened last time Powerall looked at this product".
+     *
+     * Writes five meta keys (all read-only from the UI's perspective):
+     *   _dsn_powerall_last_sync_at        UTC unix timestamp
+     *   _dsn_powerall_last_sync_result    'updated' | 'synced' | 'failed'
+     *   _dsn_powerall_last_sync_changes   JSON, empty object when nothing changed
+     *   _dsn_powerall_last_sync_snapshot  JSON: product_code, sales_price, etc.
+     *   _dsn_powerall_last_sync_message   last status line
+     *
+     * Never throws — on any error we log and bail to avoid blocking the sync.
+     *
+     * @param int    $product_id       Post ID to tag with the snapshot.
+     * @param string $result           One of 'updated' | 'synced' | 'failed'.
+     * @param array  $changes          Map of what changed this run (can be empty).
+     * @param array  $product_data     Raw Powerall record used for this run.
+     * @param mixed  $new_price        Resolved new sale price (possibly unchanged).
+     * @param mixed  $new_stock        Resolved new stock total.
+     * @param string $new_stock_status 'instock' | 'outofstock'.
+     * @param string $message          Status message persisted alongside.
+     * @return void
+     */
+    private function record_sync_snapshot(
+        int $product_id,
+        string $result,
+        array $changes,
+        array $product_data,
+        $new_price,
+        $new_stock,
+        string $new_stock_status,
+        string $message
+    ): void {
+        try {
+            update_post_meta($product_id, '_dsn_powerall_last_sync_at', time());
+            update_post_meta($product_id, '_dsn_powerall_last_sync_result', $result);
+            update_post_meta($product_id, '_dsn_powerall_last_sync_message', $message);
+            update_post_meta(
+                $product_id,
+                '_dsn_powerall_last_sync_changes',
+                wp_json_encode($changes ?: new \stdClass())
+            );
+
+            $snapshot = array(
+                'product_code'         => isset($product_data['ProductCode']) ? (string) $product_data['ProductCode'] : '',
+                'sku'                  => isset($product_data['EanCode']) ? (string) $product_data['EanCode'] : '',
+                'product_name'         => isset($product_data['Description1']) ? (string) $product_data['Description1'] : '',
+                'sales_price'          => $product_data['SalesPrice'] ?? null,
+                'promotional_price'    => $product_data['PromotionalPrice'] ?? null,
+                'sales_price_inc_vat'  => isset($product_data['SalesPriceIsIncVat']) ? (bool) $product_data['SalesPriceIsIncVat'] : null,
+                'applied_price'        => $new_price,
+                'applied_stock'        => $new_stock,
+                'applied_stock_status' => $new_stock_status,
+                'stock_mode'           => Stock_Helper::get_selected_mode(),
+                'warehouse_count'      => isset($product_data['StockPerWarehouse']) && is_array($product_data['StockPerWarehouse'])
+                    ? count($product_data['StockPerWarehouse'])
+                    : 0,
+            );
+            update_post_meta(
+                $product_id,
+                '_dsn_powerall_last_sync_snapshot',
+                wp_json_encode($snapshot)
+            );
+        } catch (\Throwable $e) {
+            if (isset($this->logger)) {
+                $this->logger->warning('Failed to record Powerall sync snapshot for product ' . $product_id . ': ' . $e->getMessage());
+            }
+        }
     }
 
     /**
