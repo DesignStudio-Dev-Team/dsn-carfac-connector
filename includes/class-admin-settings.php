@@ -602,6 +602,8 @@ class Admin_Settings {
             <?php $this->render_nav_tabs('logs'); ?>
             <p><?php esc_html_e('View the latest API requests and responses.', 'dsn-woo-powerall'); ?></p>
 
+            <?php $this->render_daily_sync_cron_status(); ?>
+
             <form method="post" action="">
                 <?php wp_nonce_field('dsn_woo_powerall_clear_log'); ?>
                 <input type="submit" name="clear_log" class="button" value="<?php esc_attr_e('Clear Log', 'dsn-woo-powerall'); ?>">
@@ -610,6 +612,67 @@ class Admin_Settings {
             <div class="log-viewer" style="margin-top: 20px; background: #fff; padding: 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
                 <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;"><?php echo esc_html($this->get_log_contents()); ?></pre>
             </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * Render daily product sync cron diagnostics.
+     *
+     * @return void
+     */
+    private function render_daily_sync_cron_status() {
+        $hook = 'dsn_woo_powerall_daily_sync';
+        $next_run = wp_next_scheduled($hook);
+        $schedule = $next_run ? (wp_get_schedule($hook) ?: __('Unknown', 'dsn-woo-powerall')) : __('Not scheduled', 'dsn-woo-powerall');
+        $last_status = get_option('dsn_woo_powerall_daily_sync_last_status', array());
+        $status = isset($last_status['status']) ? (string) $last_status['status'] : __('Never recorded', 'dsn-woo-powerall');
+        $message = isset($last_status['message']) ? (string) $last_status['message'] : __('No cron run has been recorded yet.', 'dsn-woo-powerall');
+        $completed_at = isset($last_status['completed_at']) && $last_status['completed_at'] !== '' ? (string) $last_status['completed_at'] : __('Never recorded', 'dsn-woo-powerall');
+        $duration = isset($last_status['duration_seconds']) ? absint($last_status['duration_seconds']) : 0;
+        $wp_cron_disabled = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+        ?>
+        <div style="margin: 16px 0 20px; background: #fff; padding: 16px 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
+            <h2 style="margin-top: 0;"><?php esc_html_e('Daily Sync Cron Status', 'dsn-woo-powerall'); ?></h2>
+            <table class="widefat striped" style="max-width: 900px;">
+                <tbody>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Hook', 'dsn-woo-powerall'); ?></th>
+                        <td><code><?php echo esc_html($hook); ?></code></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Schedule', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($schedule); ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Next Run', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($next_run ? wp_date('Y-m-d H:i:s T', $next_run) : __('Not scheduled', 'dsn-woo-powerall')); ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Last Status', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($status); ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Last Completed', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($completed_at); ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Last Duration', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html(sprintf(_n('%d second', '%d seconds', $duration, 'dsn-woo-powerall'), $duration)); ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('WP-Cron Disabled', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($wp_cron_disabled ? __('Yes', 'dsn-woo-powerall') : __('No', 'dsn-woo-powerall')); ?></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><?php esc_html_e('Last Message', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($message); ?></td>
+                    </tr>
+                </tbody>
+            </table>
+            <?php if ($wp_cron_disabled) : ?>
+                <p class="description"><?php esc_html_e('WP-Cron is disabled, so this job depends on a server cron calling wp-cron.php.', 'dsn-woo-powerall'); ?></p>
+            <?php endif; ?>
         </div>
         <?php
     }

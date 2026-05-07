@@ -2,6 +2,10 @@
 namespace DSNWooPowerall;
 
 class DSN_Woo_Powerall {
+    private const DAILY_SYNC_HOOK = 'dsn_woo_powerall_daily_sync';
+    private const DAILY_SYNC_LAST_STATUS_OPTION = 'dsn_woo_powerall_daily_sync_last_status';
+    private const DAILY_SYNC_DEBUG_CHECK_OPTION = 'dsn_woo_powerall_daily_sync_debug_last_check';
+
     /**
      * Plugin instance.
      *
@@ -272,9 +276,16 @@ class DSN_Woo_Powerall {
     private function register_hooks() {
         add_filter('cron_schedules', array($this, 'add_custom_cron_schedules'));
 
-        if (!wp_next_scheduled('dsn_woo_powerall_daily_sync')) {
-            wp_schedule_event(time(), 'daily', 'dsn_woo_powerall_daily_sync');
+        $next_daily_sync = wp_next_scheduled(self::DAILY_SYNC_HOOK);
+        if (!$next_daily_sync) {
+            $scheduled = wp_schedule_event(time(), 'daily', self::DAILY_SYNC_HOOK);
+            if ($scheduled) {
+                $this->logger->info('Daily product sync cron was missing and has been scheduled.');
+            } else {
+                $this->logger->error('Daily product sync cron was missing and WordPress failed to schedule it.');
+            }
         }
+        $this->maybe_log_daily_sync_debug_state($next_daily_sync ? 'registered' : 'rescheduled');
 
         // Migrate away from the older weekly log cleanup cron if it is still scheduled.
         $legacy_clear_logs = wp_next_scheduled('dsn_woo_powerall_weekly_clear_logs');
@@ -286,7 +297,7 @@ class DSN_Woo_Powerall {
             wp_schedule_event(time() + DAY_IN_SECONDS, 'dsn_woo_powerall_fortnightly', 'dsn_woo_powerall_biweekly_clear_logs');
         }
 
-        add_action('dsn_woo_powerall_daily_sync', array($this->product_sync, 'sync_products'));
+        add_action(self::DAILY_SYNC_HOOK, array($this, 'run_daily_product_sync_cron'));
         add_action('dsn_woo_powerall_biweekly_clear_logs', array($this, 'clear_all_logs'));
         // Back-compat: still run the handler if the legacy hook fires (another cron runner may trigger it once).
         add_action('dsn_woo_powerall_weekly_clear_logs', array($this, 'clear_all_logs'));
@@ -299,6 +310,113 @@ class DSN_Woo_Powerall {
         add_action('wp_ajax_dsn_woo_powerall_start_sync', array($this, 'ajax_start_manual_sync'));
         add_action('wp_ajax_dsn_woo_powerall_process_sync_batch', array($this, 'ajax_process_manual_sync_batch'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
+    }
+
+    /**
+     * Run the daily product sync cron with diagnostics around the scheduler.
+     *
+     * @return bool|\WP_Error
+     */
+    public function run_daily_product_sync_cron() {
+        $started_at = time();
+        $next_run = wp_next_scheduled(self::DAILY_SYNC_HOOK);
+
+        $this->logger->info(sprintf(
+            'Daily product sync cron started. Local time: %s | UTC: %s | Next scheduled timestamp before run: %s | Doing cron: %s',
+            current_time('mysql'),
+            gmdate('Y-m-d H:i:s'),
+            $next_run ? gmdate('Y-m-d H:i:s', $next_run) . ' UTC' : 'not scheduled',
+            wp_doing_cron() ? 'yes' : 'no'
+        ));
+
+        update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
+            'status' => 'running',
+            'started_at' => current_time('mysql'),
+            'started_at_utc' => gmdate('Y-m-d H:i:s'),
+            'completed_at' => '',
+            'completed_at_utc' => '',
+            'duration_seconds' => 0,
+            'message' => 'Daily product sync cron is running.',
+        ), false);
+
+        try {
+            $result = $this->product_sync->sync_products();
+        } catch (\Throwable $e) {
+            $this->logger->error('Daily product sync cron failed with an uncaught error: ' . $e->getMessage());
+            update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
+                'status' => 'error',
+                'started_at' => wp_date('Y-m-d H:i:s', $started_at),
+                'started_at_utc' => gmdate('Y-m-d H:i:s', $started_at),
+                'completed_at' => current_time('mysql'),
+                'completed_at_utc' => gmdate('Y-m-d H:i:s'),
+                'duration_seconds' => time() - $started_at,
+                'message' => $e->getMessage(),
+            ), false);
+
+            throw $e;
+        }
+
+        if (is_wp_error($result)) {
+            $this->logger->error('Daily product sync cron completed with error: ' . $result->get_error_message());
+            $status = 'error';
+            $message = $result->get_error_message();
+        } else {
+            $this->logger->info('Daily product sync cron completed successfully.');
+            $status = 'success';
+            $message = 'Daily product sync cron completed successfully.';
+        }
+
+        update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
+            'status' => $status,
+            'started_at' => wp_date('Y-m-d H:i:s', $started_at),
+            'started_at_utc' => gmdate('Y-m-d H:i:s', $started_at),
+            'completed_at' => current_time('mysql'),
+            'completed_at_utc' => gmdate('Y-m-d H:i:s'),
+            'duration_seconds' => time() - $started_at,
+            'message' => $message,
+        ), false);
+
+        return $result;
+    }
+
+    /**
+     * Log a throttled scheduler health line so missed daily runs are diagnosable.
+     *
+     * @param string $reason
+     * @return void
+     */
+    private function maybe_log_daily_sync_debug_state($reason) {
+        $now = time();
+        $last_check = (int) get_option(self::DAILY_SYNC_DEBUG_CHECK_OPTION, 0);
+        $next_run = wp_next_scheduled(self::DAILY_SYNC_HOOK);
+        $last_status = get_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array());
+        $last_completed_utc = isset($last_status['completed_at_utc']) ? (string) $last_status['completed_at_utc'] : '';
+        $is_overdue = $next_run && $next_run < ($now - HOUR_IN_SECONDS);
+
+        if (!$is_overdue && $last_check > ($now - DAY_IN_SECONDS)) {
+            return;
+        }
+
+        update_option(self::DAILY_SYNC_DEBUG_CHECK_OPTION, $now, false);
+
+        $this->logger->info(sprintf(
+            'Daily product sync cron debug (%s). Next run: %s | Schedule: %s | Last status: %s | Last completed UTC: %s | WP cron disabled: %s | Alternate cron: %s | Server UTC: %s',
+            $reason,
+            $next_run ? gmdate('Y-m-d H:i:s', $next_run) . ' UTC' : 'not scheduled',
+            $next_run ? (wp_get_schedule(self::DAILY_SYNC_HOOK) ?: 'unknown') : 'none',
+            isset($last_status['status']) ? (string) $last_status['status'] : 'never recorded',
+            $last_completed_utc !== '' ? $last_completed_utc : 'never recorded',
+            (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) ? 'yes' : 'no',
+            (defined('ALTERNATE_WP_CRON') && ALTERNATE_WP_CRON) ? 'yes' : 'no',
+            gmdate('Y-m-d H:i:s')
+        ));
+
+        if ($is_overdue) {
+            $this->logger->warning(sprintf(
+                'Daily product sync cron appears overdue. Scheduled for %s UTC, which is more than one hour ago. If traffic is low or DISABLE_WP_CRON is enabled, make sure a real server cron calls wp-cron.php.',
+                gmdate('Y-m-d H:i:s', $next_run)
+            ));
+        }
     }
 
     /**

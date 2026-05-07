@@ -3,7 +3,7 @@
  * Plugin Name: DSN WooCommerce to Powerall Connector
  * Plugin URI: https://designstudionetwork.com
  * Description: Connects WooCommerce with Powerall CRM for product and order synchronization
- * Version: 1.2.5
+ * Version: 1.2.6
  * Author: DesignStudio Network Inc
  * Author URI: https://designstudionetwork.com
  * Text Domain: dsn-woo-powerall
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
     exit; // Exit if accessed directly
 }
 // Define plugin constants
-define('DSN_WOO_POWERALL_VERSION', '1.2.5');
+define('DSN_WOO_POWERALL_VERSION', '1.2.6');
 define('DSN_WOO_POWERALL_PLUGIN_FILE', __FILE__);
 define('DSN_WOO_POWERALL_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('DSN_WOO_POWERALL_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -102,4 +102,4 @@ register_activation_hook(__FILE__, function() {
         deactivate_plugins(plugin_basename(__FILE__));
         wp_die(__('DSN Woo To Powerall requires WooCommerce 9.8.5 or higher.', 'dsn-woo-powerall'));
     }
-}); 
+});
