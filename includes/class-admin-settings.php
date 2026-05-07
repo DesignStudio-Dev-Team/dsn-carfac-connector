@@ -2,6 +2,10 @@
 namespace DSNWooPowerall;
 
 class Admin_Settings {
+    private const DAILY_SYNC_HOOK = 'dsn_woo_powerall_daily_sync';
+    private const DAILY_SYNC_LAST_STATUS_OPTION = 'dsn_woo_powerall_daily_sync_last_status';
+    private const LOG_RETENTION_DAYS = 7;
+
     /**
      * Logger instance
      *
@@ -583,6 +587,8 @@ class Admin_Settings {
             return;
         }
 
+        $this->handle_daily_sync_cron_action();
+
         if (isset($_POST['clear_log']) && check_admin_referer('dsn_woo_powerall_clear_log')) {
             $this->logger->clear_log();
             delete_transient('dsn_github_latest_release_DesignStudio-Dev-Team_dsn-woo-powerall-connector');
@@ -593,6 +599,13 @@ class Admin_Settings {
                 __('Log cleared and update cache reset successfully.', 'dsn-woo-powerall'),
                 'updated'
             );
+        }
+
+        $this->prune_log_file_to_recent_days();
+        $log_days = $this->get_recent_log_days();
+        $selected_log_day = isset($_GET['log_day']) ? sanitize_text_field(wp_unslash($_GET['log_day'])) : $log_days[0]['date'];
+        if (!in_array($selected_log_day, wp_list_pluck($log_days, 'date'), true)) {
+            $selected_log_day = $log_days[0]['date'];
         }
 
         settings_errors('dsn_woo_powerall_messages');
@@ -610,7 +623,8 @@ class Admin_Settings {
             </form>
 
             <div class="log-viewer" style="margin-top: 20px; background: #fff; padding: 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
-                <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto;"><?php echo esc_html($this->get_log_contents()); ?></pre>
+                <?php $this->render_log_day_tabs($log_days, $selected_log_day); ?>
+                <pre style="white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto; margin-top: 16px;"><?php echo esc_html($this->get_log_contents($selected_log_day)); ?></pre>
             </div>
         </div>
         <?php
@@ -622,15 +636,18 @@ class Admin_Settings {
      * @return void
      */
     private function render_daily_sync_cron_status() {
-        $hook = 'dsn_woo_powerall_daily_sync';
+        $hook = self::DAILY_SYNC_HOOK;
         $next_run = wp_next_scheduled($hook);
         $schedule = $next_run ? (wp_get_schedule($hook) ?: __('Unknown', 'dsn-woo-powerall')) : __('Not scheduled', 'dsn-woo-powerall');
-        $last_status = get_option('dsn_woo_powerall_daily_sync_last_status', array());
+        $last_status = get_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array());
         $status = isset($last_status['status']) ? (string) $last_status['status'] : __('Never recorded', 'dsn-woo-powerall');
         $message = isset($last_status['message']) ? (string) $last_status['message'] : __('No cron run has been recorded yet.', 'dsn-woo-powerall');
         $completed_at = isset($last_status['completed_at']) && $last_status['completed_at'] !== '' ? (string) $last_status['completed_at'] : __('Never recorded', 'dsn-woo-powerall');
         $duration = isset($last_status['duration_seconds']) ? absint($last_status['duration_seconds']) : 0;
         $wp_cron_disabled = defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+        $trigger_status = $wp_cron_disabled
+            ? __('External server cron required', 'dsn-woo-powerall')
+            : __('WordPress visitor-triggered cron enabled', 'dsn-woo-powerall');
         ?>
         <div style="margin: 16px 0 20px; background: #fff; padding: 16px 20px; border: 1px solid #ccd0d4; box-shadow: 0 1px 1px rgba(0,0,0,.04);">
             <h2 style="margin-top: 0;"><?php esc_html_e('Daily Sync Cron Status', 'dsn-woo-powerall'); ?></h2>
@@ -646,7 +663,19 @@ class Admin_Settings {
                     </tr>
                     <tr>
                         <th scope="row"><?php esc_html_e('Next Run', 'dsn-woo-powerall'); ?></th>
-                        <td><?php echo esc_html($next_run ? wp_date('Y-m-d H:i:s T', $next_run) : __('Not scheduled', 'dsn-woo-powerall')); ?></td>
+                        <td>
+                            <?php if ($next_run) : ?>
+                                <span
+                                    id="dsn-daily-sync-next-run"
+                                    data-timestamp="<?php echo esc_attr($next_run); ?>"
+                                    data-fallback="<?php echo esc_attr(wp_date('Y-m-d H:i:s T', $next_run)); ?>"
+                                >
+                                    <?php echo esc_html(wp_date('Y-m-d H:i:s T', $next_run)); ?>
+                                </span>
+                            <?php else : ?>
+                                <?php esc_html_e('Not scheduled', 'dsn-woo-powerall'); ?>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                     <tr>
                         <th scope="row"><?php esc_html_e('Last Status', 'dsn-woo-powerall'); ?></th>
@@ -661,8 +690,8 @@ class Admin_Settings {
                         <td><?php echo esc_html(sprintf(_n('%d second', '%d seconds', $duration, 'dsn-woo-powerall'), $duration)); ?></td>
                     </tr>
                     <tr>
-                        <th scope="row"><?php esc_html_e('WP-Cron Disabled', 'dsn-woo-powerall'); ?></th>
-                        <td><?php echo esc_html($wp_cron_disabled ? __('Yes', 'dsn-woo-powerall') : __('No', 'dsn-woo-powerall')); ?></td>
+                        <th scope="row"><?php esc_html_e('Cron Trigger Mode', 'dsn-woo-powerall'); ?></th>
+                        <td><?php echo esc_html($trigger_status); ?></td>
                     </tr>
                     <tr>
                         <th scope="row"><?php esc_html_e('Last Message', 'dsn-woo-powerall'); ?></th>
@@ -670,11 +699,106 @@ class Admin_Settings {
                     </tr>
                 </tbody>
             </table>
+            <form method="post" action="" style="margin-top: 12px;">
+                <?php wp_nonce_field('dsn_woo_powerall_daily_sync_cron_action'); ?>
+                <input type="hidden" name="dsn_woo_powerall_cron_action" value="repair_daily_sync">
+                <input type="submit" class="button button-primary" value="<?php esc_attr_e('Enable / Repair Daily Sync Cron', 'dsn-woo-powerall'); ?>">
+            </form>
             <?php if ($wp_cron_disabled) : ?>
-                <p class="description"><?php esc_html_e('WP-Cron is disabled, so this job depends on a server cron calling wp-cron.php.', 'dsn-woo-powerall'); ?></p>
+                <p class="description"><?php esc_html_e('The plugin daily sync can still be scheduled. This site has WordPress visitor-triggered cron disabled, so the scheduled event depends on a server cron calling wp-cron.php.', 'dsn-woo-powerall'); ?></p>
             <?php endif; ?>
         </div>
+        <?php if ($next_run) : ?>
+            <script>
+                (function() {
+                    var nextRun = document.getElementById('dsn-daily-sync-next-run');
+                    if (!nextRun || !nextRun.dataset.timestamp) {
+                        return;
+                    }
+
+                    var timestamp = parseInt(nextRun.dataset.timestamp, 10);
+                    if (!timestamp) {
+                        return;
+                    }
+
+                    var date = new Date(timestamp * 1000);
+                    var timeZone = '';
+
+                    try {
+                        timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+                        nextRun.textContent = date.toLocaleString(undefined, {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: 'numeric',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            timeZoneName: 'short'
+                        }) + (timeZone ? ' (' + timeZone + ')' : '');
+                    } catch (error) {
+                        nextRun.textContent = nextRun.dataset.fallback;
+                    }
+                })();
+            </script>
+        <?php endif; ?>
         <?php
+    }
+
+    /**
+     * Handle daily sync cron repair action.
+     *
+     * @return void
+     */
+    private function handle_daily_sync_cron_action() {
+        if (!isset($_POST['dsn_woo_powerall_cron_action'])) {
+            return;
+        }
+
+        if (!check_admin_referer('dsn_woo_powerall_daily_sync_cron_action')) {
+            return;
+        }
+
+        if (sanitize_key(wp_unslash($_POST['dsn_woo_powerall_cron_action'])) !== 'repair_daily_sync') {
+            return;
+        }
+
+        $hook = self::DAILY_SYNC_HOOK;
+        $current_schedule = wp_get_schedule($hook);
+
+        if ($current_schedule && $current_schedule !== 'daily') {
+            wp_clear_scheduled_hook($hook);
+            $current_schedule = false;
+        }
+
+        if (!$current_schedule) {
+            $scheduled = wp_schedule_event(time() + MINUTE_IN_SECONDS, 'daily', $hook);
+
+            if (!$scheduled) {
+                $this->logger->error('Daily product sync cron repair failed: WordPress did not schedule the event.');
+                add_settings_error(
+                    'dsn_woo_powerall_messages',
+                    'dsn_woo_powerall_daily_sync_cron_error',
+                    __('Daily sync cron could not be scheduled. Check the log for details.', 'dsn-woo-powerall'),
+                    'error'
+                );
+                return;
+            }
+        }
+
+        $next_run = wp_next_scheduled($hook);
+        $this->logger->info(sprintf(
+            'Daily product sync cron repair requested from admin. Schedule: %s | Next run: %s UTC | WP cron disabled: %s',
+            wp_get_schedule($hook) ?: 'unknown',
+            $next_run ? gmdate('Y-m-d H:i:s', $next_run) : 'not scheduled',
+            (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) ? 'yes' : 'no'
+        ));
+
+        add_settings_error(
+            'dsn_woo_powerall_messages',
+            'dsn_woo_powerall_daily_sync_cron_repaired',
+            __('Daily sync cron is scheduled. If this site uses server cron, make sure the server is calling wp-cron.php.', 'dsn-woo-powerall'),
+            'updated'
+        );
     }
 
     /**
@@ -1115,11 +1239,62 @@ class Admin_Settings {
     }
 
     /**
-     * Get the contents of the log file.
+     * Render tabs for the recent log days.
      *
+     * @param array<int, array{date: string, label: string}> $log_days
+     * @param string $selected_day
+     * @return void
+     */
+    private function render_log_day_tabs(array $log_days, $selected_day) {
+        ?>
+        <nav class="nav-tab-wrapper" aria-label="<?php esc_attr_e('Log days', 'dsn-woo-powerall'); ?>">
+            <?php foreach ($log_days as $day) : ?>
+                <?php
+                $is_active = $day['date'] === $selected_day;
+                $url = add_query_arg(
+                    array(
+                        'page' => 'dsn-woo-powerall-logs',
+                        'log_day' => $day['date'],
+                    ),
+                    admin_url('admin.php')
+                );
+                ?>
+                <a class="nav-tab <?php echo $is_active ? 'nav-tab-active' : ''; ?>" href="<?php echo esc_url($url); ?>">
+                    <?php echo esc_html($day['label']); ?>
+                </a>
+            <?php endforeach; ?>
+        </nav>
+        <?php
+    }
+
+    /**
+     * Get the recent log days shown as tabs.
+     *
+     * @return array<int, array{date: string, label: string}>
+     */
+    private function get_recent_log_days() {
+        $days = array();
+        $now = current_time('timestamp');
+
+        for ($i = 0; $i < self::LOG_RETENTION_DAYS; $i++) {
+            $timestamp = $now - ($i * DAY_IN_SECONDS);
+            $date = wp_date('Y-m-d', $timestamp);
+            $days[] = array(
+                'date' => $date,
+                'label' => $i === 0 ? __('Today', 'dsn-woo-powerall') : wp_date('M j', $timestamp),
+            );
+        }
+
+        return $days;
+    }
+
+    /**
+     * Get the contents of the log file for a selected day, newest first.
+     *
+     * @param string $selected_day
      * @return string
      */
-    private function get_log_contents() {
+    private function get_log_contents($selected_day) {
         $log_file = $this->logger->get_log_file_path();
 
         if (!file_exists($log_file)) {
@@ -1127,8 +1302,88 @@ class Admin_Settings {
         }
 
         $contents = file_get_contents($log_file);
+        if ($contents === false) {
+            return __('Unable to read the log file.', 'dsn-woo-powerall');
+        }
 
-        return $contents === false ? __('Unable to read the log file.', 'dsn-woo-powerall') : $contents;
+        $entries = $this->split_log_entries($contents);
+        if (empty($entries)) {
+            return __('No log entries found.', 'dsn-woo-powerall');
+        }
+
+        $entries_for_day = array_filter($entries, function ($entry) use ($selected_day) {
+            return $this->get_log_entry_date($entry) === $selected_day;
+        });
+
+        if (empty($entries_for_day)) {
+            return sprintf(
+                /* translators: %s: log date */
+                __('No log entries found for %s.', 'dsn-woo-powerall'),
+                $selected_day
+            );
+        }
+
+        return implode("\n", array_reverse(array_map('trim', $entries_for_day)));
+    }
+
+    /**
+     * Keep only the configured number of recent days in the log file.
+     *
+     * @return void
+     */
+    private function prune_log_file_to_recent_days() {
+        $log_file = $this->logger->get_log_file_path();
+
+        if (!file_exists($log_file)) {
+            return;
+        }
+
+        $contents = file_get_contents($log_file);
+        if ($contents === false || trim($contents) === '') {
+            return;
+        }
+
+        $entries = $this->split_log_entries($contents);
+        if (empty($entries)) {
+            return;
+        }
+
+        $recent_days = wp_list_pluck($this->get_recent_log_days(), 'date');
+        $retained_entries = array_filter($entries, function ($entry) use ($recent_days) {
+            return in_array($this->get_log_entry_date($entry), $recent_days, true);
+        });
+
+        if (count($retained_entries) === count($entries)) {
+            return;
+        }
+
+        file_put_contents($log_file, implode("\n", array_map('trim', $retained_entries)) . "\n");
+    }
+
+    /**
+     * Split raw log contents into timestamped entries.
+     *
+     * @param string $contents
+     * @return array<int, string>
+     */
+    private function split_log_entries($contents) {
+        $entries = preg_split('/(?=^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[[A-Z]+\])/m', trim($contents), -1, PREG_SPLIT_NO_EMPTY);
+
+        return is_array($entries) ? $entries : array();
+    }
+
+    /**
+     * Get the date portion from a log entry timestamp.
+     *
+     * @param string $entry
+     * @return string
+     */
+    private function get_log_entry_date($entry) {
+        if (preg_match('/^\[(\d{4}-\d{2}-\d{2}) /', $entry, $matches)) {
+            return $matches[1];
+        }
+
+        return '';
     }
 
     /**
