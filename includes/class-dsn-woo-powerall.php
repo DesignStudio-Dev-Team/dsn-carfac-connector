@@ -6,6 +6,8 @@ class DSN_Woo_Powerall {
     private const DAILY_SYNC_BATCH_HOOK = 'dsn_woo_powerall_daily_sync_batch';
     private const DAILY_SYNC_LAST_STATUS_OPTION = 'dsn_woo_powerall_daily_sync_last_status';
     private const DAILY_SYNC_DEBUG_CHECK_OPTION = 'dsn_woo_powerall_daily_sync_debug_last_check';
+    private const DAILY_SYNC_MAX_BATCHES_PER_TICK = 4;
+    private const DAILY_SYNC_MAX_TICK_SECONDS = 45;
 
     /**
      * Plugin instance.
@@ -399,9 +401,25 @@ class DSN_Woo_Powerall {
      */
     public function run_daily_product_sync_cron_batch() {
         $started_at = time();
+        $result = null;
+        $processed_batches = 0;
 
         try {
-            $result = $this->product_sync->process_cron_sync_batch();
+            do {
+                $result = $this->product_sync->process_cron_sync_batch();
+                $processed_batches++;
+
+                if (is_wp_error($result)) {
+                    break;
+                }
+
+                $status = isset($result['status']) ? (string) $result['status'] : '';
+                $elapsed = time() - $started_at;
+            } while (
+                $status !== 'completed'
+                && $processed_batches < self::DAILY_SYNC_MAX_BATCHES_PER_TICK
+                && $elapsed < self::DAILY_SYNC_MAX_TICK_SECONDS
+            );
         } catch (\Throwable $e) {
             $this->logger->error('Daily product sync cron batch failed with an uncaught error: ' . $e->getMessage());
             update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
@@ -434,6 +452,7 @@ class DSN_Woo_Powerall {
 
         $status = isset($result['status']) && $result['status'] === 'completed' ? 'success' : 'running';
         $message = isset($result['last_message']) ? (string) $result['last_message'] : 'Daily product sync cron batch processed.';
+        $message .= sprintf(' Batches processed this tick: %d.', $processed_batches);
 
         update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
             'status' => $status,
@@ -446,7 +465,7 @@ class DSN_Woo_Powerall {
         ), false);
 
         if ($status === 'running') {
-            $delay = isset($result['delay_seconds']) ? max(1, intval($result['delay_seconds'])) : Product_Sync::DEFAULT_BATCH_DELAY;
+            $delay = 1;
             $this->schedule_next_daily_sync_batch($delay);
         } else {
             wp_clear_scheduled_hook(self::DAILY_SYNC_BATCH_HOOK);
