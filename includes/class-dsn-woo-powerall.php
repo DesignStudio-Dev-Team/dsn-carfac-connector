@@ -3,6 +3,7 @@ namespace DSNWooPowerall;
 
 class DSN_Woo_Powerall {
     private const DAILY_SYNC_HOOK = 'dsn_woo_powerall_daily_sync';
+    private const DAILY_SYNC_BATCH_HOOK = 'dsn_woo_powerall_daily_sync_batch';
     private const DAILY_SYNC_LAST_STATUS_OPTION = 'dsn_woo_powerall_daily_sync_last_status';
     private const DAILY_SYNC_DEBUG_CHECK_OPTION = 'dsn_woo_powerall_daily_sync_debug_last_check';
 
@@ -298,6 +299,7 @@ class DSN_Woo_Powerall {
         }
 
         add_action(self::DAILY_SYNC_HOOK, array($this, 'run_daily_product_sync_cron'));
+        add_action(self::DAILY_SYNC_BATCH_HOOK, array($this, 'run_daily_product_sync_cron_batch'));
         add_action('dsn_woo_powerall_biweekly_clear_logs', array($this, 'clear_all_logs'));
         // Back-compat: still run the handler if the legacy hook fires (another cron runner may trigger it once).
         add_action('dsn_woo_powerall_weekly_clear_logs', array($this, 'clear_all_logs'));
@@ -340,7 +342,7 @@ class DSN_Woo_Powerall {
         ), false);
 
         try {
-            $result = $this->product_sync->sync_products();
+            $result = $this->product_sync->start_cron_sync_run();
         } catch (\Throwable $e) {
             $this->logger->error('Daily product sync cron failed with an uncaught error: ' . $e->getMessage());
             update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
@@ -361,9 +363,20 @@ class DSN_Woo_Powerall {
             $status = 'error';
             $message = $result->get_error_message();
         } else {
-            $this->logger->info('Daily product sync cron completed successfully.');
-            $status = 'success';
-            $message = 'Daily product sync cron completed successfully.';
+            $status = isset($result['status']) && $result['status'] === 'completed' ? 'success' : 'running';
+            $message = isset($result['last_message']) ? (string) $result['last_message'] : 'Daily product sync cron batch run started.';
+            $this->logger->info('Daily product sync cron batch run started. Status: ' . $status . ' | Message: ' . $message);
+
+            if ($status === 'running') {
+                $first_batch_result = $this->run_daily_product_sync_cron_batch();
+                if (is_wp_error($first_batch_result)) {
+                    $status = 'error';
+                    $message = $first_batch_result->get_error_message();
+                } elseif (isset($first_batch_result['status'])) {
+                    $status = $first_batch_result['status'] === 'completed' ? 'success' : 'running';
+                    $message = isset($first_batch_result['last_message']) ? (string) $first_batch_result['last_message'] : $message;
+                }
+            }
         }
 
         update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
@@ -377,6 +390,89 @@ class DSN_Woo_Powerall {
         ), false);
 
         return $result;
+    }
+
+    /**
+     * Process one daily product sync cron batch.
+     *
+     * @return array|\WP_Error
+     */
+    public function run_daily_product_sync_cron_batch() {
+        $started_at = time();
+
+        try {
+            $result = $this->product_sync->process_cron_sync_batch();
+        } catch (\Throwable $e) {
+            $this->logger->error('Daily product sync cron batch failed with an uncaught error: ' . $e->getMessage());
+            update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
+                'status' => 'error',
+                'started_at' => wp_date('Y-m-d H:i:s', $started_at),
+                'started_at_utc' => gmdate('Y-m-d H:i:s', $started_at),
+                'completed_at' => current_time('mysql'),
+                'completed_at_utc' => gmdate('Y-m-d H:i:s'),
+                'duration_seconds' => time() - $started_at,
+                'message' => $e->getMessage(),
+            ), false);
+
+            throw $e;
+        }
+
+        if (is_wp_error($result)) {
+            $this->logger->error('Daily product sync cron batch completed with error: ' . $result->get_error_message());
+            update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
+                'status' => 'error',
+                'started_at' => wp_date('Y-m-d H:i:s', $started_at),
+                'started_at_utc' => gmdate('Y-m-d H:i:s', $started_at),
+                'completed_at' => current_time('mysql'),
+                'completed_at_utc' => gmdate('Y-m-d H:i:s'),
+                'duration_seconds' => time() - $started_at,
+                'message' => $result->get_error_message(),
+            ), false);
+
+            return $result;
+        }
+
+        $status = isset($result['status']) && $result['status'] === 'completed' ? 'success' : 'running';
+        $message = isset($result['last_message']) ? (string) $result['last_message'] : 'Daily product sync cron batch processed.';
+
+        update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
+            'status' => $status,
+            'started_at' => isset($result['started_at']) ? (string) $result['started_at'] : wp_date('Y-m-d H:i:s', $started_at),
+            'started_at_utc' => gmdate('Y-m-d H:i:s', $started_at),
+            'completed_at' => current_time('mysql'),
+            'completed_at_utc' => gmdate('Y-m-d H:i:s'),
+            'duration_seconds' => time() - $started_at,
+            'message' => $message,
+        ), false);
+
+        if ($status === 'running') {
+            $delay = isset($result['delay_seconds']) ? max(1, intval($result['delay_seconds'])) : Product_Sync::DEFAULT_BATCH_DELAY;
+            $this->schedule_next_daily_sync_batch($delay);
+        } else {
+            wp_clear_scheduled_hook(self::DAILY_SYNC_BATCH_HOOK);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Schedule the next daily sync batch if one is not already queued.
+     *
+     * @param int $delay_seconds
+     * @return void
+     */
+    private function schedule_next_daily_sync_batch($delay_seconds) {
+        if (wp_next_scheduled(self::DAILY_SYNC_BATCH_HOOK)) {
+            return;
+        }
+
+        $scheduled = wp_schedule_single_event(time() + max(1, intval($delay_seconds)), self::DAILY_SYNC_BATCH_HOOK);
+        if (!$scheduled) {
+            $this->logger->error('Daily product sync cron could not schedule the next batch event.');
+            return;
+        }
+
+        $this->logger->info('Daily product sync cron scheduled next batch in ' . max(1, intval($delay_seconds)) . ' second(s).');
     }
 
     /**

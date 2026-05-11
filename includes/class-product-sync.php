@@ -3,6 +3,7 @@ namespace DSNWooPowerall;
 
 class Product_Sync {
     public const MANUAL_SYNC_STATE_OPTION = 'dsn_woo_powerall_manual_sync_state';
+    public const CRON_SYNC_STATE_OPTION = 'dsn_woo_powerall_cron_sync_state';
     public const DEFAULT_BATCH_SIZE = 25;
     public const DEFAULT_BATCH_DELAY = 1;
     private const MAX_STORED_ERRORS = 5;
@@ -225,6 +226,149 @@ class Product_Sync {
      */
     public function get_manual_sync_state() {
         return $this->prepare_manual_sync_state_response($this->read_manual_sync_state());
+    }
+
+    /**
+     * Start the daily cron sync as a persisted batch run.
+     *
+     * @return array|WP_Error
+     */
+    public function start_cron_sync_run() {
+        $previous_state = $this->read_cron_sync_state();
+        if (!empty($previous_state['run_id']) && $previous_state['status'] === 'running') {
+            $this->logger->warning('Daily cron product sync start skipped because a cron sync is already running. Run ID: ' . $previous_state['run_id']);
+            return $this->prepare_manual_sync_state_response($previous_state);
+        }
+
+        if (!empty($previous_state['run_id'])) {
+            $this->delete_manual_sync_cache($previous_state['run_id']);
+        }
+
+        $product_list = $this->get_product_list();
+        if (is_wp_error($product_list)) {
+            $this->logger->error('Unable to start daily cron product sync: ' . $product_list->get_error_message());
+            return $product_list;
+        }
+
+        $run_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : uniqid('dsn_cron_sync_', true);
+        $cache_result = $this->store_manual_sync_cache($run_id, $product_list);
+        if (is_wp_error($cache_result)) {
+            $this->logger->error('Unable to cache daily cron sync payload: ' . $cache_result->get_error_message());
+            return $cache_result;
+        }
+
+        $batch_size = self::DEFAULT_BATCH_SIZE;
+        $state = array_merge($this->get_default_manual_sync_state(), array(
+            'run_id' => $run_id,
+            'status' => count($product_list) > 0 ? 'running' : 'completed',
+            'started_at' => current_time('mysql'),
+            'completed_at' => count($product_list) > 0 ? '' : current_time('mysql'),
+            'batch_size' => $batch_size,
+            'delay_seconds' => max(1, self::get_batch_delay_seconds()),
+            'total_products' => count($product_list),
+            'last_message' => count($product_list) > 0
+                ? __('Daily cron sync queued. Processing batches will begin shortly.', 'dsn-woo-powerall')
+                : __('No products were returned by Powerall.', 'dsn-woo-powerall'),
+        ));
+
+        $this->save_cron_sync_state($state);
+        $this->logger->info('Daily cron product sync started. Run ID: ' . $run_id . ' | Products: ' . $state['total_products'] . ' | Batch size: ' . $state['batch_size']);
+
+        if ($state['status'] === 'completed') {
+            $this->delete_manual_sync_cache($run_id);
+        }
+
+        return $this->prepare_manual_sync_state_response($state);
+    }
+
+    /**
+     * Process the next daily cron sync batch.
+     *
+     * @return array|WP_Error
+     */
+    public function process_cron_sync_batch() {
+        $state = $this->read_cron_sync_state();
+
+        if (empty($state['run_id'])) {
+            return new \WP_Error('cron_sync_missing', __('No daily cron sync run was found.', 'dsn-woo-powerall'));
+        }
+
+        if ($state['status'] === 'completed') {
+            return $this->prepare_manual_sync_state_response($state);
+        }
+
+        $offset = max(0, intval($state['current_offset']));
+        $total_products = max(0, intval($state['total_products']));
+
+        if ($total_products === 0 || $offset >= $total_products) {
+            $state = $this->complete_cron_sync_state($state, __('Daily cron product sync completed.', 'dsn-woo-powerall'));
+            return $this->prepare_manual_sync_state_response($state);
+        }
+
+        $batch_size = max(1, intval($state['batch_size']));
+        $batch = $this->get_manual_sync_batch_from_cache($state['run_id'], $offset, $batch_size);
+        if (is_wp_error($batch)) {
+            $this->logger->error('Unable to load daily cron sync batch: ' . $batch->get_error_message());
+            return $batch;
+        }
+
+        if (empty($batch)) {
+            $state = $this->complete_cron_sync_state(
+                $state,
+                __('Daily cron product sync completed, but the cached batch data ended sooner than expected.', 'dsn-woo-powerall')
+            );
+            return $this->prepare_manual_sync_state_response($state);
+        }
+
+        $batch_number = (int) floor($offset / $batch_size) + 1;
+        $this->logger->info(sprintf(
+            'Daily cron product sync processing batch %d. Offset: %d | Count: %d | Total: %d',
+            $batch_number,
+            $offset,
+            count($batch),
+            $total_products
+        ));
+
+        $batch_summary = $this->process_product_batch($batch);
+
+        $state['processed'] += $batch_summary['processed'];
+        $state['updated'] += $batch_summary['updated'];
+        $state['synced'] += $batch_summary['synced'];
+        $state['skipped'] += $batch_summary['skipped'];
+        $state['failed'] += $batch_summary['failed'];
+        $state['current_offset'] = min($total_products, $offset + count($batch));
+
+        if (!empty($batch_summary['last_result'])) {
+            $state['last_sku'] = $batch_summary['last_result']['sku'] ?? '';
+            $state['last_product_name'] = $batch_summary['last_result']['product_name'] ?? '';
+        }
+
+        if (!empty($batch_summary['errors'])) {
+            $state['recent_errors'] = array_slice(
+                array_merge($state['recent_errors'], $batch_summary['errors']),
+                -self::MAX_STORED_ERRORS
+            );
+        }
+
+        if ($state['current_offset'] >= $total_products) {
+            $state = $this->complete_cron_sync_state($state, __('Daily cron product sync completed.', 'dsn-woo-powerall'));
+        } else {
+            $state['status'] = 'running';
+            $state['last_message'] = sprintf(
+                __('Daily cron sync processed %1$d of %2$d products.', 'dsn-woo-powerall'),
+                $state['processed'],
+                $total_products
+            );
+            $this->save_cron_sync_state($state);
+        }
+
+        return $this->prepare_manual_sync_state_response($state, array(
+            'batch_processed' => $batch_summary['processed'],
+            'batch_updated' => $batch_summary['updated'],
+            'batch_synced' => $batch_summary['synced'],
+            'batch_skipped' => $batch_summary['skipped'],
+            'batch_failed' => $batch_summary['failed'],
+        ));
     }
 
     /**
@@ -1092,6 +1236,31 @@ class Product_Sync {
     }
 
     /**
+     * Read the saved cron sync state.
+     *
+     * @return array
+     */
+    private function read_cron_sync_state() {
+        $state = get_option(self::CRON_SYNC_STATE_OPTION, array());
+
+        if (!is_array($state)) {
+            $state = array();
+        }
+
+        return wp_parse_args($state, $this->get_default_manual_sync_state());
+    }
+
+    /**
+     * Save the cron sync state.
+     *
+     * @param array $state
+     * @return void
+     */
+    private function save_cron_sync_state(array $state) {
+        update_option(self::CRON_SYNC_STATE_OPTION, $state, false);
+    }
+
+    /**
      * Prepare the manual sync state for the UI response.
      *
      * @param array $state
@@ -1141,6 +1310,36 @@ class Product_Sync {
 
         $this->save_manual_sync_state($state);
         $this->delete_manual_sync_cache($state['run_id']);
+
+        return $state;
+    }
+
+    /**
+     * Mark a cron sync as completed and clean up its cache file.
+     *
+     * @param array $state
+     * @param string $message
+     * @return array
+     */
+    private function complete_cron_sync_state(array $state, $message = '') {
+        $state['status'] = 'completed';
+        $state['completed_at'] = current_time('mysql');
+        $state['current_offset'] = max(intval($state['current_offset']), intval($state['total_products']));
+        if ($message !== '') {
+            $state['last_message'] = $message;
+        }
+
+        $this->save_cron_sync_state($state);
+        $this->delete_manual_sync_cache($state['run_id']);
+
+        $this->logger->info(sprintf(
+            'Daily cron product sync completed. Processed: %d Updated: %d Unchanged: %d Skipped: %d Failed: %d',
+            $state['processed'],
+            $state['updated'],
+            $state['synced'],
+            $state['skipped'],
+            $state['failed']
+        ));
 
         return $state;
     }
