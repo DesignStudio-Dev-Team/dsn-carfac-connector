@@ -372,6 +372,33 @@ class Product_Sync {
     }
 
     /**
+     * Discard a failed cron run so a new product-list fetch can start cleanly.
+     *
+     * @return void
+     */
+    public function reset_cron_sync_run() {
+        $state = $this->read_cron_sync_state();
+
+        if (!empty($state['run_id'])) {
+            $this->delete_manual_sync_cache($state['run_id']);
+        }
+
+        delete_option(self::CRON_SYNC_STATE_OPTION);
+        $this->logger->warning('Daily cron product sync state was reset so a fresh run can be started.');
+    }
+
+    /**
+     * Check whether a persisted daily cron sync still needs processing.
+     *
+     * @return bool
+     */
+    public function has_running_cron_sync_run() {
+        $state = $this->read_cron_sync_state();
+
+        return !empty($state['run_id']) && $state['status'] === 'running';
+    }
+
+    /**
      * Sync a single product from Powerall CRM to WooCommerce.
      *
      * @param array $product_data Product data from Powerall CRM

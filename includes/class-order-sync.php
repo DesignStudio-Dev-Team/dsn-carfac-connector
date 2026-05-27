@@ -30,14 +30,24 @@ class Order_Sync {
             return new \WP_Error('invalid_order', __('Invalid order.', 'dsn-woo-powerall'));
         }
 
-        // Prepare order data for Powerall CRM
+        if ($order->get_meta('_powerall_order_id')) {
+            return true;
+        }
+
         $order_data = $this->prepare_order_data($order);
-        
-        // Create order in Powerall CRM
+        if (is_wp_error($order_data)) {
+            $order->add_order_note(
+                sprintf(
+                    __('Failed to create order in Powerall CRM: %s', 'dsn-woo-powerall'),
+                    $order_data->get_error_message()
+                )
+            );
+            return $order_data;
+        }
+
         $result = $this->api_handler->create_order($order_data);
-        
+
         if (is_wp_error($result)) {
-            // Log error
             $order->add_order_note(
                 sprintf(
                     __('Failed to create order in Powerall CRM: %s', 'dsn-woo-powerall'),
@@ -47,15 +57,29 @@ class Order_Sync {
             return $result;
         }
 
-        // Save Powerall CRM order ID
-        $order->update_meta_data('_powerall_order_id', $result['id']);
+        $powerall_order = isset($result['Data'][0]) && is_array($result['Data'][0])
+            ? $result['Data'][0]
+            : (isset($result['Data']) && is_array($result['Data']) ? $result['Data'] : $result);
+        $powerall_order_id = isset($powerall_order['Id']) ? (string) $powerall_order['Id'] : '';
+
+        if ($powerall_order_id === '') {
+            $error = new \WP_Error('invalid_order_response', __('Powerall did not return an order ID.', 'dsn-woo-powerall'));
+            $order->add_order_note(
+                sprintf(
+                    __('Failed to create order in Powerall CRM: %s', 'dsn-woo-powerall'),
+                    $error->get_error_message()
+                )
+            );
+            return $error;
+        }
+
+        $order->update_meta_data('_powerall_order_id', $powerall_order_id);
         $order->save();
 
-        // Add success note
         $order->add_order_note(
             sprintf(
                 __('Order created in Powerall CRM with ID: %s', 'dsn-woo-powerall'),
-                $result['id']
+                $powerall_order_id
             )
         );
 
@@ -113,21 +137,37 @@ class Order_Sync {
      * Prepare order data for Powerall CRM
      *
      * @param WC_Order $order WooCommerce order
-     * @return array Order data for Powerall CRM
+     * @return array|\WP_Error Order data for Powerall CRM
      */
     private function prepare_order_data($order) {
         $items = array();
         foreach ($order->get_items() as $item) {
             $product = $item->get_product();
-            $powerall_id = $product ? $product->get_meta('_powerall_product_id') : null;
+            $product_code = $product ? $this->get_powerall_product_code($product) : '';
 
-            if ($powerall_id) {
-                $items[] = array(
-                    'product_id' => $powerall_id,
-                    'quantity' => $item->get_quantity(),
-                    'price' => $item->get_total(),
+            if ($product_code === '') {
+                return new \WP_Error(
+                    'missing_powerall_product_code',
+                    sprintf(
+                        /* translators: %s: order item name */
+                        __('No Powerall ProductCode was found for order item "%s".', 'dsn-woo-powerall'),
+                        $item->get_name()
+                    )
                 );
             }
+
+            $quantity = (float) $item->get_quantity();
+            $line_total = (float) $item->get_total();
+            $line_tax = (float) $item->get_total_tax();
+            $items[] = array(
+                'sku' => $product_code,
+                'quantity' => $quantity,
+                'gross_price' => $quantity > 0 ? ($line_total + $line_tax) / $quantity : 0,
+            );
+        }
+
+        if (empty($items)) {
+            return new \WP_Error('missing_order_lines', __('The order does not contain any product lines for Powerall.', 'dsn-woo-powerall'));
         }
 
         // Get billing address using HPOS-compatible methods
@@ -162,9 +202,11 @@ class Order_Sync {
 
         return array(
             'external_id' => $order->get_id(),
+            'order_number' => $order->get_order_number(),
             'customer_id' => $order->get_customer_id(), // WP user ID (0 for guests)
             'customer' => $billing_address,
-            'shipping' => $shipping_address,
+            'billing_address' => $billing_address,
+            'shipping_address' => $shipping_address,
             'items' => $items,
             'total' => $order->get_total(),
             'currency' => $order->get_currency(),
@@ -175,6 +217,25 @@ class Order_Sync {
             'date_created' => $order->get_date_created()->format('c'),
             'date_modified' => $order->get_date_modified()->format('c'),
         );
+    }
+
+    /**
+     * Resolve the Powerall product code stored during sync, falling back to SKU.
+     *
+     * @param WC_Product $product WooCommerce product
+     * @return string
+     */
+    private function get_powerall_product_code($product) {
+        $snapshot = $product->get_meta('_dsn_powerall_last_sync_snapshot');
+        if (is_string($snapshot)) {
+            $snapshot = json_decode($snapshot, true);
+        }
+
+        if (is_array($snapshot) && !empty($snapshot['product_code'])) {
+            return trim((string) $snapshot['product_code']);
+        }
+
+        return trim((string) $product->get_sku());
     }
 
     /**
@@ -196,4 +257,4 @@ class Order_Sync {
 
         return isset($status_map[$wc_status]) ? $status_map[$wc_status] : 'pending';
     }
-} 
+}

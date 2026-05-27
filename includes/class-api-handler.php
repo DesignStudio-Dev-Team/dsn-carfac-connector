@@ -116,7 +116,7 @@ class API_Handler {
             'Accept' => 'application/json',
         );
 
-        $this->logger->info(sprintf('Request headers: %s', json_encode($headers)));
+        $this->logger->info(sprintf('Making authenticated %s request to Powerall endpoint: %s', $method, $endpoint));
 
         $args = array(
             'method' => $method,
@@ -155,8 +155,14 @@ class API_Handler {
             json_encode($response_headers)
         ));
 
+        if ($response_code >= 200 && $response_code < 300 && !empty($data['Error'])) {
+            $error_message = $this->get_api_error_message($data, $response_code);
+            $this->logger->error(sprintf('Powerall response contained an error: %s. Response body: %s', $error_message, $body));
+            return new \WP_Error('api_error', $error_message, array('status' => $response_code));
+        }
+
         if ($response_code < 200 || $response_code >= 300) {
-            $error_message = isset($data['message']) ? $data['message'] : __('Unknown error occurred.', 'dsn-woo-powerall');
+            $error_message = $this->get_api_error_message($data, $response_code);
             $error = new \WP_Error('api_error', $error_message, array('status' => $response_code));
             $this->logger->error(sprintf(
                 'API error (HTTP %d): %s. Response body: %s',
@@ -169,6 +175,44 @@ class API_Handler {
 
         $this->logger->info(sprintf('API request successful (HTTP %d)', $response_code));
         return $data;
+    }
+
+    /**
+     * Extract an actionable message from Powerall error responses.
+     *
+     * @param mixed $data Decoded response body
+     * @param int $response_code HTTP response status
+     * @return string
+     */
+    private function get_api_error_message($data, $response_code) {
+        if (is_array($data)) {
+            foreach (array('message', 'Message', 'detail', 'Detail', 'title', 'Title', 'error_description', 'ErrorMessage', 'Error', 'error') as $key) {
+                if (isset($data[$key]) && is_string($data[$key]) && trim($data[$key]) !== '') {
+                    return trim($data[$key]);
+                }
+            }
+
+            foreach (array('errors', 'Errors', 'Error', 'error') as $key) {
+                if (!empty($data[$key])) {
+                    $messages = array();
+                    array_walk_recursive($data[$key], function ($value) use (&$messages) {
+                        if (is_string($value) && trim($value) !== '') {
+                            $messages[] = trim($value);
+                        }
+                    });
+
+                    if (!empty($messages)) {
+                        return implode(' ', array_unique($messages));
+                    }
+                }
+            }
+        }
+
+        return sprintf(
+            /* translators: %d: HTTP response status code */
+            __('Powerall API returned HTTP %d without an error message. See the plugin log for the response body.', 'dsn-woo-powerall'),
+            (int) $response_code
+        );
     }
 
     /**
@@ -386,7 +430,9 @@ class API_Handler {
         }
 
         // Get the relation ID from the response
-        $relation = $response['Data'];
+        $relation = isset($response['Data'][0]) && is_array($response['Data'][0])
+            ? $response['Data'][0]
+            : $response['Data'];
         if (empty($relation['Id'])) {
             $error = new \WP_Error('invalid_response', 'No relation ID in response');
             $this->logger->error('Failed to create relation: ' . $error->get_error_message());
@@ -458,49 +504,65 @@ class API_Handler {
      * @return array|WP_Error Order data or error
      */
     public function create_order($order_data, $simulate = false) {
+        $lines = array();
+        foreach (($order_data['items'] ?? array()) as $item) {
+            $product_code = trim((string) ($item['sku'] ?? ''));
+            if ($product_code === '') {
+                return new \WP_Error('missing_product_code', __('A Powerall sales order line is missing ProductCode.', 'dsn-woo-powerall'));
+            }
 
-        //get get_or_create_relation with order_data
+            $lines[] = array(
+                'ProductCode' => substr($product_code, 0, 20),
+                'QuantityOrdered' => (float) ($item['quantity'] ?? 0),
+                'GrossPrice' => (float) ($item['gross_price'] ?? $item['price'] ?? 0),
+                'PriceIncVat' => true,
+            );
+        }
+
+        if (empty($lines)) {
+            return new \WP_Error('missing_order_lines', __('The Powerall sales order has no product lines.', 'dsn-woo-powerall'));
+        }
+
         $relation = $this->get_or_create_relation($order_data);
         if (is_wp_error($relation)) {
             return $relation;
         }
 
-        if(isset($relation['Id'])) {
-            $relation_id = $relation['Id'];
-        } else {
-            $this->logger->info('error getting relation id');
-
+        if (empty($relation['Id'])) {
+            return new \WP_Error('missing_relation_id', __('Powerall relation does not contain an ID.', 'dsn-woo-powerall'));
         }
 
-        $this->logger->info('Using test relation ID: ' . $relation_id);
+        $relation_id = (string) $relation['Id'];
+        $billing = isset($order_data['billing_address']) ? $order_data['billing_address'] : ($order_data['customer'] ?? array());
+        $shipping = isset($order_data['shipping_address']) ? $order_data['shipping_address'] : ($order_data['shipping'] ?? $billing);
+        $billing_address = isset($billing['address']) && is_array($billing['address']) ? $billing['address'] : $billing;
+        $shipping_address = isset($shipping['address']) && is_array($shipping['address']) ? $shipping['address'] : $shipping;
+        $order_number = absint($order_data['order_number'] ?? 0);
+        if ($order_number === 0) {
+            $order_number = absint($order_data['external_id'] ?? 0);
+        }
+        $order_date = !empty($order_data['date_created'])
+            ? gmdate('Y-m-d', strtotime($order_data['date_created']))
+            : current_time('Y-m-d');
 
-        // Transform WooCommerce order data to Powerall sales order format
         $sales_order = array(
             'RelationId' => $relation_id,
-            'EntryNumber' => intval($order_data['order_number'] ?? 0),
-            'OrderDate' => date('Y-m-d'),
-            'DeliveryDate' => date('Y-m-d', strtotime('+1 day')),
-            'Lines' => array_map(function($item) {
-                // $uniqueID =  $this->get_product_uid($item['product_id']);
-                return array(
-                    'ProductCode' => $item['sku'],
-                    'QuantityOrdered' => intval($item['quantity']),
-                    'GrossPrice' => floatval($item['price']),
-                    'PriceIncVat' => true
-                );
-            }, $order_data['items']),
-            'DeliveryAddress' => isset($order_data['shipping_address']) ? array(
-                'Address' => $order_data['shipping_address']['address_1'],
-                'City' => $order_data['shipping_address']['city'],
-                'PostalCode' => $order_data['shipping_address']['postcode'],
-                'Country' => $order_data['shipping_address']['country']
-            ) : null,
-            'InvoiceAddress' => isset($order_data['billing_address']) ? array(
-                'Address' => $order_data['billing_address']['address_1'],
-                'City' => $order_data['billing_address']['city'],
-                'PostalCode' => $order_data['billing_address']['postcode'],
-                'Country' => $order_data['billing_address']['country']
-            ) : null
+            'EntryNumber' => min(99999999, $order_number),
+            'OrderDate' => $order_date,
+            'ApplyWebshopSettings' => true,
+            'Reference1' => substr('WooCommerce order ' . (string) ($order_data['order_number'] ?? $order_number), 0, 40),
+            'EmailAddress' => substr((string) ($order_data['customer']['email'] ?? ''), 0, 75),
+            'Phone' => substr((string) ($order_data['customer']['phone'] ?? ''), 0, 20),
+            'InvoiceName1' => substr(trim((string) ($billing['first_name'] ?? '') . ' ' . (string) ($billing['last_name'] ?? '')), 0, 50),
+            'InvoiceAddressLine' => substr((string) ($billing_address['street'] ?? $billing_address['address_1'] ?? ''), 0, 50),
+            'InvoiceZipCode' => substr((string) ($billing_address['postcode'] ?? ''), 0, 9),
+            'InvoiceTown' => substr((string) ($billing_address['city'] ?? ''), 0, 26),
+            'DeliveryName1' => substr(trim((string) ($shipping['first_name'] ?? '') . ' ' . (string) ($shipping['last_name'] ?? '')), 0, 50),
+            'DeliveryAddressLine' => substr((string) ($shipping_address['street'] ?? $shipping_address['address_1'] ?? ''), 0, 50),
+            'DeliveryZipCode' => substr((string) ($shipping_address['postcode'] ?? ''), 0, 9),
+            'DeliveryTown' => substr((string) ($shipping_address['city'] ?? ''), 0, 26),
+            'InternalNote' => substr((string) ($order_data['notes'] ?? ''), 0, 20480),
+            'Lines' => $lines,
         );
 
         $endpoint = $simulate ? 'sales-orders/simulate' : 'sales-orders';

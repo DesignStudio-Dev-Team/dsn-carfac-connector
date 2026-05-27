@@ -4,10 +4,10 @@ namespace DSNWooPowerall;
 class DSN_Woo_Powerall {
     private const DAILY_SYNC_HOOK = 'dsn_woo_powerall_daily_sync';
     private const DAILY_SYNC_BATCH_HOOK = 'dsn_woo_powerall_daily_sync_batch';
+    private const DAILY_SYNC_START_RETRY_HOOK = 'dsn_woo_powerall_daily_sync_start_retry';
     private const DAILY_SYNC_LAST_STATUS_OPTION = 'dsn_woo_powerall_daily_sync_last_status';
     private const DAILY_SYNC_DEBUG_CHECK_OPTION = 'dsn_woo_powerall_daily_sync_debug_last_check';
-    private const DAILY_SYNC_MAX_BATCHES_PER_TICK = 4;
-    private const DAILY_SYNC_MAX_TICK_SECONDS = 45;
+    private const DAILY_SYNC_RECOVERY_DELAY_SECONDS = 60;
 
     /**
      * Plugin instance.
@@ -302,12 +302,18 @@ class DSN_Woo_Powerall {
 
         add_action(self::DAILY_SYNC_HOOK, array($this, 'run_daily_product_sync_cron'));
         add_action(self::DAILY_SYNC_BATCH_HOOK, array($this, 'run_daily_product_sync_cron_batch'));
+        add_action(self::DAILY_SYNC_START_RETRY_HOOK, array($this, 'run_daily_product_sync_cron'));
+
+        if ($this->product_sync->has_running_cron_sync_run() && !wp_next_scheduled(self::DAILY_SYNC_BATCH_HOOK)) {
+            $this->logger->warning('Daily product sync cron found an unfinished run without a continuation event. Scheduling automatic recovery.');
+            $this->schedule_next_daily_sync_batch(self::DAILY_SYNC_RECOVERY_DELAY_SECONDS);
+        }
+
         add_action('dsn_woo_powerall_biweekly_clear_logs', array($this, 'clear_all_logs'));
         // Back-compat: still run the handler if the legacy hook fires (another cron runner may trigger it once).
         add_action('dsn_woo_powerall_weekly_clear_logs', array($this, 'clear_all_logs'));
 
         add_action('woocommerce_checkout_order_processed', array($this->order_sync, 'handle_new_order'), 10, 1);
-        add_action('woocommerce_order_status_changed', array($this->order_sync, 'handle_order_status_change'), 10, 3);
 
         add_action('admin_menu', array($this->admin_settings, 'add_admin_menu'));
         add_action('wp_ajax_dsn_woo_powerall_cleanup', array($this, 'ajax_cleanup_sale_prices'));
@@ -324,6 +330,7 @@ class DSN_Woo_Powerall {
     public function run_daily_product_sync_cron() {
         $started_at = time();
         $next_run = wp_next_scheduled(self::DAILY_SYNC_HOOK);
+        $this->schedule_daily_sync_start_retry();
 
         $this->logger->info(sprintf(
             'Daily product sync cron started. Local time: %s | UTC: %s | Next scheduled timestamp before run: %s | Doing cron: %s',
@@ -361,10 +368,11 @@ class DSN_Woo_Powerall {
         }
 
         if (is_wp_error($result)) {
-            $this->logger->error('Daily product sync cron completed with error: ' . $result->get_error_message());
+            $this->logger->error('Daily product sync cron could not start: ' . $result->get_error_message() . '. Automatic start retry remains scheduled.');
             $status = 'error';
-            $message = $result->get_error_message();
+            $message = $result->get_error_message() . ' Automatic retry queued for the next WP-Cron trigger.';
         } else {
+            wp_clear_scheduled_hook(self::DAILY_SYNC_START_RETRY_HOOK);
             $status = isset($result['status']) && $result['status'] === 'completed' ? 'success' : 'running';
             $message = isset($result['last_message']) ? (string) $result['last_message'] : 'Daily product sync cron batch run started.';
             $this->logger->info('Daily product sync cron batch run started. Status: ' . $status . ' | Message: ' . $message);
@@ -395,7 +403,7 @@ class DSN_Woo_Powerall {
     }
 
     /**
-     * Process one daily product sync cron batch.
+     * Keep processing daily sync batches, with a queued recovery event for timeouts.
      *
      * @return array|\WP_Error
      */
@@ -403,6 +411,9 @@ class DSN_Woo_Powerall {
         $started_at = time();
         $result = null;
         $processed_batches = 0;
+
+        // Queue recovery before doing work. A fatal timeout cannot schedule its own retry.
+        $this->schedule_next_daily_sync_batch(self::DAILY_SYNC_RECOVERY_DELAY_SECONDS);
 
         try {
             do {
@@ -414,12 +425,7 @@ class DSN_Woo_Powerall {
                 }
 
                 $status = isset($result['status']) ? (string) $result['status'] : '';
-                $elapsed = time() - $started_at;
-            } while (
-                $status !== 'completed'
-                && $processed_batches < self::DAILY_SYNC_MAX_BATCHES_PER_TICK
-                && $elapsed < self::DAILY_SYNC_MAX_TICK_SECONDS
-            );
+            } while ($status !== 'completed');
         } catch (\Throwable $e) {
             $this->logger->error('Daily product sync cron batch failed with an uncaught error: ' . $e->getMessage());
             update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
@@ -436,7 +442,10 @@ class DSN_Woo_Powerall {
         }
 
         if (is_wp_error($result)) {
-            $this->logger->error('Daily product sync cron batch completed with error: ' . $result->get_error_message());
+            $this->logger->error('Daily product sync cron batch stopped with error: ' . $result->get_error_message() . '. Resetting the failed run and scheduling a fresh start retry.');
+            $this->product_sync->reset_cron_sync_run();
+            wp_clear_scheduled_hook(self::DAILY_SYNC_BATCH_HOOK);
+            $this->schedule_daily_sync_start_retry();
             update_option(self::DAILY_SYNC_LAST_STATUS_OPTION, array(
                 'status' => 'error',
                 'started_at' => wp_date('Y-m-d H:i:s', $started_at),
@@ -444,7 +453,7 @@ class DSN_Woo_Powerall {
                 'completed_at' => current_time('mysql'),
                 'completed_at_utc' => gmdate('Y-m-d H:i:s'),
                 'duration_seconds' => time() - $started_at,
-                'message' => $result->get_error_message(),
+                'message' => $result->get_error_message() . ' Failed run reset; a fresh automatic retry is queued for the next WP-Cron trigger.',
             ), false);
 
             return $result;
@@ -465,8 +474,7 @@ class DSN_Woo_Powerall {
         ), false);
 
         if ($status === 'running') {
-            $delay = 1;
-            $this->schedule_next_daily_sync_batch($delay);
+            $this->schedule_next_daily_sync_batch(self::DAILY_SYNC_RECOVERY_DELAY_SECONDS);
         } else {
             wp_clear_scheduled_hook(self::DAILY_SYNC_BATCH_HOOK);
         }
@@ -492,6 +500,25 @@ class DSN_Woo_Powerall {
         }
 
         $this->logger->info('Daily product sync cron scheduled next batch in ' . max(1, intval($delay_seconds)) . ' second(s).');
+    }
+
+    /**
+     * Queue a start retry before fetching or caching the daily sync payload.
+     *
+     * @return void
+     */
+    private function schedule_daily_sync_start_retry() {
+        if (wp_next_scheduled(self::DAILY_SYNC_START_RETRY_HOOK)) {
+            return;
+        }
+
+        $scheduled = wp_schedule_single_event(time() + self::DAILY_SYNC_RECOVERY_DELAY_SECONDS, self::DAILY_SYNC_START_RETRY_HOOK);
+        if (!$scheduled) {
+            $this->logger->error('Daily product sync cron could not schedule an automatic start retry.');
+            return;
+        }
+
+        $this->logger->info('Daily product sync cron queued an automatic start retry before beginning work.');
     }
 
     /**
