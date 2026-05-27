@@ -505,6 +505,7 @@ class Product_Sync {
             $has_console_promo = false;
             $console_id = get_post_meta($product_id, 'console_id', true);
 
+            $this->logger->info('SKU and WordPress IDs: ' . $sku . ': ' . $product_id);
             if ($console_id) {
                 $console_path = trailingslashit(WP_CONTENT_DIR) . 'plugins/syndified/website-content/json/Product/' . $console_id . '.json';
                 if (file_exists($console_path) && is_readable($console_path)) {
@@ -533,7 +534,34 @@ class Product_Sync {
                 $old_price_num = $old_price !== '' && $old_price !== null ? floatval($old_price) : null;
                 $new_price_num = floatval($new_price);
                 if ($old_price_num === null || abs($old_price_num - $new_price_num) >= 0.0001) {
-                    $product->set_sale_price($new_price);
+
+                    $this->logger->info ('set_sale_price ' . $new_price . ' for SKU ' . $sku);
+
+                    if ($product->get_regular_price () >= $new_price || !$product->get_sale_price()) {
+
+                        delete_post_meta ($product_id, '_regular_price');
+                        delete_post_meta ($product_id, '_price');
+                        delete_post_meta ($product_id, '_sale_price');
+                        $product->set_sale_price('');
+                        $product->set_regular_price($new_price); // set your price
+
+                        $product->save();
+
+                        wc_update_product_lookup_tables($product_id);
+
+                        $this->logger->info ('aaa get_regular_price: ' . json_encode ($product->get_regular_price ()));
+                        $this->logger->info ('---');
+
+
+                    } else {
+                        $product->set_sale_price($new_price);
+                        $product->save();
+                        $this->logger->info ('bbb get_regular_price: ' . json_encode ($product->get_regular_price ()));
+                        $this->logger->info ('---');
+                    }
+
+
+                    //$product->set_sale_price($new_price);
                     $price_changed = true;
                 }
             } elseif ($has_console_promo) {

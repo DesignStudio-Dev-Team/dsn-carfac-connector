@@ -268,13 +268,22 @@ class API_Handler {
         }
 
         $stock_mode = Stock_Helper::get_selected_mode();
-        $warehouses = array();
 
+        // Pass raw warehouse data so calculate_total_stock can filter by
+        // excluded warehouse names before summing (it normalizes internally).
+        $total_quantity = Stock_Helper::calculate_total_stock(
+            $product_data['StockPerWarehouse'],
+            $stock_mode
+        );
+
+        // Build a normalized list for the response payload.
+        $warehouses = array();
         foreach ($product_data['StockPerWarehouse'] as $stock) {
+            if (!is_array($stock) || !Stock_Helper::is_warehouse_included($stock)) {
+                continue;
+            }
             $warehouses[] = Stock_Helper::normalize_warehouse_stock($stock);
         }
-
-        $total_quantity = Stock_Helper::calculate_total_stock($warehouses, $stock_mode);
 
         $this->logger->info('Stock data for product ' . $product_id . ' (mode: ' . $stock_mode . ', total: ' . $total_quantity . '): ' . json_encode($warehouses));
 
