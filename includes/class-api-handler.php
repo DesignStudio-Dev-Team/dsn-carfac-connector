@@ -417,7 +417,8 @@ class API_Handler {
             'CountryCode' => 1, // Default to Netherlands
             'Type'        => 'Personal',
             'Phone'       => $phone,
-            'PayVat'      => true,
+            'PayVat'        => true,
+            'DebtorVatCode' => 1,
         );
 
 
