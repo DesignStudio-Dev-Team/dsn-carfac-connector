@@ -1,5 +1,5 @@
 <?php
-namespace DSNWooPowerall;
+namespace DSNCarfac;
 
 class HPOS_Compatibility {
     /**
@@ -14,7 +14,8 @@ class HPOS_Compatibility {
      */
     public function declare_hpos_compatibility() {
         if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
-            \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', DSN_WOO_POWERALL_PLUGIN_FILE, true);
+            \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', DSN_CARFAC_PLUGIN_FILE, true);
         }
     }
-} 
+}
+ 
