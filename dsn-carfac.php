@@ -1,9 +1,10 @@
 <?php
 /**
  * Plugin Name: DSN Carfac
- * Plugin URI: https://designstudio.com
+ * Plugin URI: https://github.com/DesignStudio-Dev-Team/dsn-carfac-connector
+ * Update URI: https://github.com/DesignStudio-Dev-Team/dsn-carfac-connector
  * Description: Connects WooCommerce with Carfac for products and orders synchronization
- * Version: 1.1.0
+ * Version: 1.1.1
  * Author: DesignStudio Network Inc
  * Author URI: https://designstudio.com
  * Text Domain: dsn-carfac
@@ -20,10 +21,12 @@ if (!defined('ABSPATH')) {
     exit; // Exit if accessed directly
 }
 // Define plugin constants
-define('DSN_CARFAC_VERSION', '1.1.0');
+define('DSN_CARFAC_VERSION', '1.1.1');
 define('DSN_CARFAC_PLUGIN_FILE', __FILE__);
 define('DSN_CARFAC_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('DSN_CARFAC_PLUGIN_URL', plugin_dir_url(__FILE__));
+define('DSN_CARFAC_GITHUB_OWNER', 'DesignStudio-Dev-Team');
+define('DSN_CARFAC_GITHUB_REPOSITORY', 'dsn-carfac-connector');
 
 // Autoloader
 spl_autoload_register(function ($class) {
@@ -44,6 +47,27 @@ spl_autoload_register(function ($class) {
         require_once $file;
     }
 });
+
+// Register the GitHub Releases updater independently of WooCommerce so the
+// plugin can still receive fixes when WooCommerce is temporarily inactive.
+function DSN_CARFAC_init_github_updater() {
+    static $updater = null;
+
+    if ($updater !== null) {
+        return;
+    }
+
+    $token = defined('DSN_CARFAC_GITHUB_TOKEN') ? DSN_CARFAC_GITHUB_TOKEN : '';
+    $token = apply_filters('dsn_carfac_github_token', $token);
+
+    $updater = new \DSNCarfac\GitHub_Updater(
+        DSN_CARFAC_GITHUB_OWNER,
+        DSN_CARFAC_GITHUB_REPOSITORY,
+        DSN_CARFAC_PLUGIN_FILE,
+        is_string($token) ? $token : ''
+    );
+}
+add_action('plugins_loaded', 'DSN_CARFAC_init_github_updater', 5);
 
 // Initialize plugin
 function DSN_CARFAC_init() {

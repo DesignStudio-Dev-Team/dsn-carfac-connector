@@ -35,6 +35,13 @@ A WordPress plugin that seamlessly integrates WooCommerce with Carfac ERP, enabl
 4. Activate the plugin
 5. Go to sidebar under **DSN Carfac** for Settings
 
+## Updates
+
+The plugin checks the latest published release in the
+[DSN Carfac GitHub repository](https://github.com/DesignStudio-Dev-Team/dsn-carfac-connector).
+WordPress only offers an update when the release includes the packaged
+`dsn-woo-carfac-connector-vX.Y.Z.zip` asset.
+
 ## Configuration
 
 1. **API Settings**

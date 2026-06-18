@@ -1,59 +1,83 @@
-name: Create Release ZIP
+name: Create DSN Carfac Release
 
 on:
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build_and_release:
+  build-and-release:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
 
-      - name: Create release ZIP (package only plugin folder)
+      - name: Verify tag matches plugin version
+        shell: bash
         run: |
-          set -e
-          rm -rf package release-package.zip || true
-          mkdir -p package/dsn-woo-powerall-connector
-          # Copy repository contents into package/dsn-woo-powerall-connector but exclude CI, git and dev folders.
-          # NOTE: languages/ is intentionally NOT excluded — translation .po/.mo files must ship in the zip.
-          rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='.vscode' --exclude='package' --exclude='.DS_Store' ./ package/dsn-woo-powerall-connector/
-          # Zip the packaged plugin folder so the archive root contains the plugin folder only
-          (cd package && zip -r ../release-package.zip dsn-woo-powerall-connector)
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          plugin_version="$(sed -n 's/^[[:space:]]*\* Version:[[:space:]]*//p' dsn-carfac.php | head -n 1)"
 
-      - name: Verify languages folder is in the release ZIP
-        run: |
-          set -e
-          echo "Listing languages/ entries inside the release zip:"
-          unzip -l release-package.zip | grep -E 'dsn-woo-powerall-connector/languages/' || {
-            echo "ERROR: languages/ folder missing from release ZIP"
-            exit 1
-          }
-          # Require at least one compiled .mo so translations actually work at runtime.
-          if ! unzip -l release-package.zip | grep -Eq 'dsn-woo-powerall-connector/languages/.+\.mo$'; then
-            echo "ERROR: no .mo files found in languages/ inside the release ZIP"
+          if [[ -z "$plugin_version" || "$plugin_version" != "$tag_version" ]]; then
+            echo "Tag version ($tag_version) does not match plugin version ($plugin_version)."
             exit 1
           fi
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: ${{ github.ref_name }}
-          body: Release ${{ github.ref_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build WordPress-ready ZIP
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          plugin_slug="dsn-woo-carfac-connector"
+          asset_name="${plugin_slug}-${GITHUB_REF_NAME}.zip"
 
-      - name: Upload release asset
-        uses: actions/upload-release-asset@v1
+          rm -rf package "$asset_name"
+          mkdir -p "package/$plugin_slug"
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.gitignore' \
+            --exclude='.DS_Store' \
+            --exclude='node_modules' \
+            --exclude='package' \
+            --exclude='*.log' \
+            --exclude='product_changes_log.txt' \
+            ./ "package/$plugin_slug/"
+
+          (cd package && zip -r "../$asset_name" "$plugin_slug")
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+
+      - name: Verify ZIP layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_name="${{ steps.build.outputs.asset_name }}"
+          plugin_slug="dsn-woo-carfac-connector"
+
+          unzip -t "$asset_name"
+          unzip -Z1 "$asset_name" | grep -qx "$plugin_slug/dsn-carfac.php"
+
+          unexpected="$(unzip -Z1 "$asset_name" | grep -Ev "^${plugin_slug}(/|$)" || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "ZIP contains files outside the plugin folder:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+          if unzip -Z1 "$asset_name" | grep -Eq '(^|/)\.git(/|$)|(^|/)\.github(/|$)|\.DS_Store$'; then
+            echo "ZIP contains development-only files."
+            exit 1
+          fi
+
+      - name: Create GitHub Release and upload ZIP
+        uses: softprops/action-gh-release@v3
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./release-package.zip
-          asset_name: dsn-woo-powerall-connector-${{ github.ref_name }}.zip
-          asset_content_type: application/zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: DSN Carfac ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ${{ steps.build.outputs.asset_name }}
