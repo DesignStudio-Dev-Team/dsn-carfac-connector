@@ -226,7 +226,12 @@ class Carfac_Provider implements API_Provider_Interface {
                 ));
                 return new \WP_Error(
                     'carfac_http_error',
-                    sprintf('Carfac %s returned HTTP %d: %s', $endpoint, $status_code, $preview)
+                    sprintf('Carfac %s returned HTTP %d: %s', $endpoint, $status_code, $preview),
+                    [
+                        'status' => $status_code,
+                        'endpoint' => $endpoint,
+                        'body' => $preview,
+                    ]
                 );
             }
 
@@ -517,7 +522,8 @@ class Carfac_Provider implements API_Provider_Interface {
             'partNameList' => array_values($partNames),
         ]);
 
-        $response = $this->post('Part/GetParts', $request);
+        $partsResponse = $this->request_parts_with_extended_fallback($request);
+        $response = $partsResponse['response'];
         if (is_wp_error($response)) {
             $this->logger->error('Carfac Part/GetParts (SKU chunk) failed: ' . $response->get_error_message());
             return $response;
@@ -541,7 +547,10 @@ class Carfac_Provider implements API_Provider_Interface {
         $normalized = [];
         foreach ($parts as $part) {
             $partId = (string) ($part['PartId'] ?? $part['partId'] ?? '');
-            $normalized[] = $this->normalize_part_product($part, $partId, $stockMap[(string) $partId] ?? null);
+            $normalizedPart = $this->normalize_part_product($part, $partId, $stockMap[(string) $partId] ?? null);
+            $normalizedPart['CarfacSalePriceAvailable'] = $partsResponse['sale_price_available']
+                || ($normalizedPart['SalePrice'] !== null && $normalizedPart['SalePrice'] !== '');
+            $normalized[] = $normalizedPart;
         }
 
         $this->logger->info(sprintf(
@@ -551,6 +560,65 @@ class Carfac_Provider implements API_Provider_Interface {
         ));
 
         return $normalized;
+    }
+
+    /**
+     * Extended Part/GetParts can fail when Carfac cannot reach the dealer.
+     * Retry it once, then fall back to the non-extended response so stock and
+     * regular prices can still sync. The caller uses sale_price_available to
+     * avoid clearing a previously synced sale price during that fallback.
+     *
+     * @return array{response: array|\WP_Error, sale_price_available: bool}
+     */
+    private function request_parts_with_extended_fallback(array $request) {
+        $salePriceAvailable = !empty($request['extendedView']);
+        $response = $this->post('Part/GetParts', $request);
+
+        if (!is_wp_error($response) || !$salePriceAvailable || !$this->is_dealer_connection_error($response)) {
+            return [
+                'response' => $response,
+                'sale_price_available' => $salePriceAvailable,
+            ];
+        }
+
+        $this->logger->warning('Carfac Part/GetParts extended response could not connect to the dealer; retrying once in 2 seconds.');
+        sleep(2);
+        $response = $this->post('Part/GetParts', $request);
+        if (!is_wp_error($response)) {
+            return [
+                'response' => $response,
+                'sale_price_available' => true,
+            ];
+        }
+
+        if (!$this->is_dealer_connection_error($response)) {
+            return [
+                'response' => $response,
+                'sale_price_available' => true,
+            ];
+        }
+
+        $this->logger->warning('Carfac Part/GetParts extended response failed again; retrying with extendedView=false. Existing WooCommerce sale prices will be preserved.');
+        $fallbackRequest = $request;
+        $fallbackRequest['extendedView'] = false;
+
+        return [
+            'response' => $this->post('Part/GetParts', $fallbackRequest),
+            'sale_price_available' => false,
+        ];
+    }
+
+    private function is_dealer_connection_error($error) {
+        if (!is_wp_error($error)) {
+            return false;
+        }
+
+        $data = $error->get_error_data();
+        if (is_array($data) && (int) ($data['status'] ?? 0) === 504) {
+            return true;
+        }
+
+        return stripos($error->get_error_message(), 'unable to connect to the dealer') !== false;
     }
 
     public function get_products_page(int $offset, int $limit, array $params = []) {
@@ -637,7 +705,10 @@ class Carfac_Provider implements API_Provider_Interface {
     }
 
     private function get_products_from_parts(array $params = []) {
-        $this->logger->info('Carfac: Fetching products via Part/GetParts using paged extendedView=true response');
+        $this->logger->info(sprintf(
+            'Carfac: Fetching products via Part/GetParts using paged extendedView=%s response',
+            get_option('DSN_CARFAC_use_sale_price', '1') !== '0' ? 'true' : 'false'
+        ));
         $products = $this->get_products_from_parts_paged($params);
         if (is_wp_error($products)) {
             return $products;
@@ -888,9 +959,9 @@ class Carfac_Provider implements API_Provider_Interface {
             'descriptionGerman' => null,
             'descriptionEnglish' => null,
             'lastSellingDate' => null,
-            // Extended view contains Carfac's additional pricing fields,
-            // including Tijdelijke Prijs / temporary sale pricing.
-            'extendedView' => true,
+            // Only request the heavier extended response when temporary sale
+            // pricing is enabled in the plugin settings.
+            'extendedView' => get_option('DSN_CARFAC_use_sale_price', '1') !== '0',
             'visibleOnWebshop' => null,
             'webshopGroupLinkId' => null,
             'paging' => [

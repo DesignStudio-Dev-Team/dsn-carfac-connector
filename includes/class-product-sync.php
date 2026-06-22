@@ -648,20 +648,44 @@ class Product_Sync {
         // Carfac's Tijdelijke Prijs / temporary sale price is already incl. VAT.
         $new_sale_price = $this->format_price($product_data['SalePrice'] ?? null, true);
 
+        $use_sale_price = get_option('DSN_CARFAC_use_sale_price', '1') !== '0';
+        $sale_price_available = !array_key_exists('CarfacSalePriceAvailable', $product_data)
+            || (bool) $product_data['CarfacSalePriceAvailable'];
         $has_incoming_sale_price = $new_sale_price !== null && $new_sale_price !== '' && (float) $new_sale_price > 0;
-        $has_valid_sale_price = $has_incoming_sale_price
+        $has_valid_sale_price = $use_sale_price
+            && $sale_price_available
+            && $has_incoming_sale_price
             && $new_regular_price !== null
             && $new_regular_price !== ''
             && (float) $new_sale_price < (float) $new_regular_price;
-        $applied_sale_price = $has_valid_sale_price ? $new_sale_price : '';
+        $can_preserve_sale_price = $use_sale_price
+            && !$sale_price_available
+            && $old_sale_price !== null
+            && $old_sale_price !== ''
+            && $new_regular_price !== null
+            && $new_regular_price !== ''
+            && (float) $old_sale_price < (float) $new_regular_price;
+        $applied_sale_price = $can_preserve_sale_price
+            ? $old_sale_price
+            : ($has_valid_sale_price ? $new_sale_price : '');
 
-        if ($has_incoming_sale_price && !$has_valid_sale_price) {
+        if ($use_sale_price && $has_incoming_sale_price && !$has_valid_sale_price) {
             $this->logger->warning(sprintf(
                 'Carfac temporary price not applied to WooCommerce: ID=%d | SKU=%s | RegularPrice=%s | SalePrice=%s | Reason=sale price must be lower than regular price',
                 $product_id,
                 $product->get_sku() ?: $sku,
                 $new_regular_price === null || $new_regular_price === '' ? 'n/a' : $new_regular_price,
                 $new_sale_price
+            ));
+        }
+
+        if ($use_sale_price && !$sale_price_available) {
+            $this->logger->warning(sprintf(
+                'Carfac temporary price unavailable from extended GetParts: ID=%d | SKU=%s | ExistingSalePrice=%s | Action=%s',
+                $product_id,
+                $product->get_sku() ?: $sku,
+                $old_sale_price === null || $old_sale_price === '' ? 'n/a' : $old_sale_price,
+                $can_preserve_sale_price ? 'preserved' : 'none to preserve'
             ));
         }
 
@@ -696,7 +720,9 @@ class Product_Sync {
                 $changes[] = sprintf(__('Sale Price updated from Tijdelijke Prijs incl. VAT: %s &rarr; %s', 'dsn-carfac'), $old_sale_price ?: '0', $applied_sale_price);
             }
         } elseif ($old_sale_price !== '' && $old_sale_price !== null) {
-            $changes[] = __('Sale Price cleared', 'dsn-carfac');
+            $changes[] = $use_sale_price
+                ? __('Sale Price cleared', 'dsn-carfac')
+                : __('Sale Price cleared because Carfac temporary sale pricing is disabled', 'dsn-carfac');
         }
         if ($old_stock != $total_stock) {
             $stock_detail = sprintf(__('Stock updated: %s &rarr; %s', 'dsn-carfac'), $old_stock ?: '0', $total_stock);
@@ -879,11 +905,15 @@ class Product_Sync {
         $regular_price_ex_vat = $this->format_price($product_data['SalesPrice'] ?? null, true);
         $regular_price_inc_vat = $this->format_carfac_regular_price($product_data);
         $sale_price_inc_vat = $this->format_price($product_data['SalePrice'] ?? null, true);
+        $sale_price_available = !array_key_exists('CarfacSalePriceAvailable', $product_data)
+            || (bool) $product_data['CarfacSalePriceAvailable'];
 
         $product->update_meta_data('_carfac_sales_price_ex_vat', $regular_price_ex_vat);
         $product->update_meta_data('_carfac_sales_price_inc_vat', $regular_price_inc_vat);
-        $product->update_meta_data('_carfac_sale_price_inc_vat', $sale_price_inc_vat);
-        $product->update_meta_data('_carfac_temporary_price_inc_vat', $sale_price_inc_vat);
+        if ($sale_price_available) {
+            $product->update_meta_data('_carfac_sale_price_inc_vat', $sale_price_inc_vat);
+            $product->update_meta_data('_carfac_temporary_price_inc_vat', $sale_price_inc_vat);
+        }
         $product->update_meta_data('_carfac_applied_sale_price_inc_vat', $applied_sale_price);
 
         if (!empty($location_stock)) {
@@ -904,6 +934,7 @@ class Product_Sync {
                 'regular_price_ex_vat' => $regular_price_ex_vat,
                 'regular_price_inc_vat' => $regular_price_inc_vat,
                 'sale_price_inc_vat' => $sale_price_inc_vat,
+                'sale_price_available' => $sale_price_available,
                 'applied_sale_price_inc_vat' => $applied_sale_price,
             ],
         ]);

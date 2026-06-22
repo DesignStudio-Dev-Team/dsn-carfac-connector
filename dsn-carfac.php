@@ -4,7 +4,7 @@
  * Plugin URI: https://github.com/DesignStudio-Dev-Team/dsn-carfac-connector
  * Update URI: https://github.com/DesignStudio-Dev-Team/dsn-carfac-connector
  * Description: Connects WooCommerce with Carfac for products and orders synchronization
- * Version: 1.1.2
+ * Version: 1.1.3
  * Author: DesignStudio Network Inc
  * Author URI: https://designstudio.com
  * Text Domain: dsn-carfac
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
     exit; // Exit if accessed directly
 }
 // Define plugin constants
-define('DSN_CARFAC_VERSION', '1.1.2');
+define('DSN_CARFAC_VERSION', '1.1.3');
 define('DSN_CARFAC_PLUGIN_FILE', __FILE__);
 define('DSN_CARFAC_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('DSN_CARFAC_PLUGIN_URL', plugin_dir_url(__FILE__));
