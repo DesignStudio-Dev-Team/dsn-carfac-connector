@@ -648,25 +648,24 @@ class Product_Sync {
         // Carfac's Tijdelijke Prijs / temporary sale price is already incl. VAT.
         $new_sale_price = $this->format_price($product_data['SalePrice'] ?? null, true);
 
-        // Always update the regular price from SalesPrice (the main selling price)
-        if ($old_regular_price != $new_regular_price) {
-            $product->set_regular_price($new_regular_price);
+        $has_incoming_sale_price = $new_sale_price !== null && $new_sale_price !== '' && (float) $new_sale_price > 0;
+        $has_valid_sale_price = $has_incoming_sale_price
+            && $new_regular_price !== null
+            && $new_regular_price !== ''
+            && (float) $new_sale_price < (float) $new_regular_price;
+        $applied_sale_price = $has_valid_sale_price ? $new_sale_price : '';
+
+        if ($has_incoming_sale_price && !$has_valid_sale_price) {
+            $this->logger->warning(sprintf(
+                'Carfac temporary price not applied to WooCommerce: ID=%d | SKU=%s | RegularPrice=%s | SalePrice=%s | Reason=sale price must be lower than regular price',
+                $product_id,
+                $product->get_sku() ?: $sku,
+                $new_regular_price === null || $new_regular_price === '' ? 'n/a' : $new_regular_price,
+                $new_sale_price
+            ));
         }
 
-        // Check if the "Use Carfac Sale Price" setting is enabled
-        $use_sale_price = get_option('DSN_CARFAC_use_sale_price', '1') !== '0';
-
-        if ($use_sale_price && $new_sale_price !== null && $new_sale_price !== '' && (float)$new_sale_price > 0) {
-            // Map Carfac Tijdelijke Prijs / temporary sale price to WooCommerce sale price.
-            if ($old_sale_price != $new_sale_price) {
-                $product->set_sale_price($new_sale_price);
-            }
-        } else {
-            // Clear any existing sale price when setting is disabled or no sale price from Carfac
-            if ($old_sale_price !== '') {
-                $product->set_sale_price('');
-            }
-        }
+        $this->apply_woocommerce_prices($product, $new_regular_price, $applied_sale_price);
 
         // --- Stock Handling ---
         $product->set_manage_stock(true);
@@ -692,9 +691,9 @@ class Product_Sync {
         if ($old_regular_price != $new_regular_price) {
             $changes[] = sprintf(__('Regular Price updated incl. VAT: %s &rarr; %s', 'dsn-carfac'), $old_regular_price ?: '0', $new_regular_price);
         }
-        if ($use_sale_price && $new_sale_price !== null && (float)$new_sale_price > 0) {
-            if ($old_sale_price != $new_sale_price) {
-                $changes[] = sprintf(__('Sale Price updated from Tijdelijke Prijs incl. VAT: %s &rarr; %s', 'dsn-carfac'), $old_sale_price ?: '0', $new_sale_price);
+        if ($applied_sale_price !== '') {
+            if ($old_sale_price != $applied_sale_price) {
+                $changes[] = sprintf(__('Sale Price updated from Tijdelijke Prijs incl. VAT: %s &rarr; %s', 'dsn-carfac'), $old_sale_price ?: '0', $applied_sale_price);
             }
         } elseif ($old_sale_price !== '' && $old_sale_price !== null) {
             $changes[] = __('Sale Price cleared', 'dsn-carfac');
@@ -712,11 +711,11 @@ class Product_Sync {
             $changes[] = $stock_detail;
         }
 
-        $this->update_carfac_product_meta($product, $product_data, $changes, $location_stock, $sku);
+        $this->update_carfac_product_meta($product, $product_data, $changes, $location_stock, $sku, $applied_sale_price);
 
         // Log changes to a txt file if price or stock changed
         $regular_price_changed = ($old_regular_price != $new_regular_price);
-        $sale_price_changed = ($use_sale_price && $old_sale_price != $new_sale_price);
+        $sale_price_changed = ($old_sale_price != $applied_sale_price);
         if ($regular_price_changed || $sale_price_changed || $old_stock != $total_stock) {
             $log_parts = [
                 sprintf('[%s] SKU: %s', date('Y-m-d H:i:s'), $product->get_sku()),
@@ -725,7 +724,7 @@ class Product_Sync {
                 $log_parts[] = sprintf('Regular Price incl. VAT: %s → %s', $old_regular_price, $new_regular_price);
             }
             if ($sale_price_changed) {
-                $log_parts[] = sprintf('Sale Price incl. VAT: %s → %s', $old_sale_price, $new_sale_price);
+                $log_parts[] = sprintf('Sale Price incl. VAT: %s → %s', $old_sale_price, $applied_sale_price);
             }
             if ($old_stock != $total_stock) {
                 $stock_log = sprintf('Stock: %s → %s', $old_stock, $total_stock);
@@ -761,7 +760,90 @@ class Product_Sync {
             return $product_id;
         }
 
+        $price_meta_verification = $this->verify_woocommerce_price_meta($product_id, $new_regular_price, $applied_sale_price, $sku);
+        if (is_wp_error($price_meta_verification)) {
+            return $price_meta_verification;
+        }
+
         return $product_id;
+    }
+
+    /**
+     * Persist all three WooCommerce price properties. Clearing sale dates makes
+     * Carfac's temporary price active immediately instead of leaving an expired
+     * or future WooCommerce schedule in control of _price.
+     */
+    private function apply_woocommerce_prices($product, $regular_price, $sale_price) {
+        $product->set_regular_price($regular_price);
+        $product->set_sale_price($sale_price);
+        $product->set_date_on_sale_from(null);
+        $product->set_date_on_sale_to(null);
+        $product->set_price($sale_price !== '' ? $sale_price : $regular_price);
+    }
+
+    /**
+     * Confirm that WooCommerce persisted _regular_price, _sale_price, and
+     * _price. Retry once through the CRUD API if another hook changed them.
+     *
+     * @return true|\WP_Error
+     */
+    private function verify_woocommerce_price_meta($product_id, $regular_price, $sale_price, string $sku) {
+        $expected = [
+            '_regular_price' => $this->normalize_woocommerce_meta_price($regular_price),
+            '_sale_price' => $this->normalize_woocommerce_meta_price($sale_price),
+            '_price' => $this->normalize_woocommerce_meta_price($sale_price !== '' ? $sale_price : $regular_price),
+        ];
+
+        $stored = $this->get_woocommerce_price_meta($product_id);
+        if ($stored !== $expected) {
+            $retry_product = wc_get_product($product_id);
+            if ($retry_product && !$retry_product->is_type(['variable', 'grouped'])) {
+                $this->apply_woocommerce_prices($retry_product, $regular_price, $sale_price);
+                $retry_product->save();
+                $stored = $this->get_woocommerce_price_meta($product_id);
+            }
+        }
+
+        if ($stored !== $expected) {
+            $message = sprintf(
+                'WooCommerce price meta verification failed: ID=%d | SKU=%s | Expected=%s | Stored=%s',
+                $product_id,
+                $sku,
+                wp_json_encode($expected),
+                wp_json_encode($stored)
+            );
+            $this->logger->error($message);
+            return new \WP_Error('carfac_price_meta_verification_failed', $message);
+        }
+
+        if ($sale_price !== '') {
+            $this->logger->info(sprintf(
+                'WooCommerce sale price saved: ID=%d | SKU=%s | _regular_price=%s | _sale_price=%s | _price=%s',
+                $product_id,
+                $sku,
+                $stored['_regular_price'],
+                $stored['_sale_price'],
+                $stored['_price']
+            ));
+        }
+
+        return true;
+    }
+
+    private function get_woocommerce_price_meta($product_id) {
+        return [
+            '_regular_price' => $this->normalize_woocommerce_meta_price(get_post_meta($product_id, '_regular_price', true)),
+            '_sale_price' => $this->normalize_woocommerce_meta_price(get_post_meta($product_id, '_sale_price', true)),
+            '_price' => $this->normalize_woocommerce_meta_price(get_post_meta($product_id, '_price', true)),
+        ];
+    }
+
+    private function normalize_woocommerce_meta_price($price) {
+        if ($price === null || $price === '') {
+            return '';
+        }
+
+        return (string) wc_format_decimal($price);
     }
 
     /**
@@ -779,7 +861,7 @@ class Product_Sync {
         return '';
     }
 
-    private function update_carfac_product_meta($product, array $product_data, array $changes, array $location_stock, string $fallback_identifier) {
+    private function update_carfac_product_meta($product, array $product_data, array $changes, array $location_stock, string $fallback_identifier, $applied_sale_price) {
         $part_id = $this->get_first_product_value($product_data, ['CarfacPartId', 'PartId', 'partId']);
         $part_name = $this->get_first_product_value($product_data, ['CarfacPartName', 'PartName', 'partName']);
         $product_id = $this->get_first_product_value($product_data, ['CarfacProductId', 'ProductId', 'productId']);
@@ -801,6 +883,8 @@ class Product_Sync {
         $product->update_meta_data('_carfac_sales_price_ex_vat', $regular_price_ex_vat);
         $product->update_meta_data('_carfac_sales_price_inc_vat', $regular_price_inc_vat);
         $product->update_meta_data('_carfac_sale_price_inc_vat', $sale_price_inc_vat);
+        $product->update_meta_data('_carfac_temporary_price_inc_vat', $sale_price_inc_vat);
+        $product->update_meta_data('_carfac_applied_sale_price_inc_vat', $applied_sale_price);
 
         if (!empty($location_stock)) {
             $product->update_meta_data('_carfac_stock_per_location', $location_stock);
@@ -820,6 +904,7 @@ class Product_Sync {
                 'regular_price_ex_vat' => $regular_price_ex_vat,
                 'regular_price_inc_vat' => $regular_price_inc_vat,
                 'sale_price_inc_vat' => $sale_price_inc_vat,
+                'applied_sale_price_inc_vat' => $applied_sale_price,
             ],
         ]);
     }

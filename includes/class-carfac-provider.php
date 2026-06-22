@@ -381,9 +381,18 @@ class Carfac_Provider implements API_Provider_Interface {
             'Tijdelijke Prijs incl. btw',
             'TemporaryPrice', 'temporaryPrice',
             'TemporarySalePrice', 'temporarySalePrice',
+            'TemporarySalesPrice', 'temporarySalesPrice',
+            'TemporarySellingPrice', 'temporarySellingPrice',
+            'TemporarySellingPriceInclVat', 'temporarySellingPriceInclVat',
+            'TemporarySellingPriceInclBtw', 'temporarySellingPriceInclBtw',
+            'TijdelijkeVerkoopprijs', 'tijdelijkeVerkoopprijs',
             'PromoPrice', 'promoPrice',
+            'PromotionPrice', 'promotionPrice',
             'PromotionalPrice', 'promotionalPrice',
             'ActionPrice', 'actionPrice',
+            'ActiePrijs', 'actiePrijs',
+            'Actieprijs', 'actieprijs',
+            'Aanbiedingsprijs', 'aanbiedingsprijs',
             'SalePrice', 'salePrice',
         ]);
 
@@ -397,11 +406,18 @@ class Carfac_Provider implements API_Provider_Interface {
             'Tijdelijke prijs incl. btw',
             'Temporary Price',
             'Temporary Sale Price',
+            'Temporary Sales Price',
+            'Temporary Selling Price',
+            'Temporary Selling Price incl. VAT',
+            'Temporary Selling Price incl. btw',
+            'Tijdelijke Verkoopprijs',
             'Sale Price',
             'Promo Price',
+            'Promotion Price',
             'Promotional Price',
             'Actieprijs',
             'Actie Prijs',
+            'Aanbiedingsprijs',
         ]);
     }
 
@@ -621,7 +637,7 @@ class Carfac_Provider implements API_Provider_Interface {
     }
 
     private function get_products_from_parts(array $params = []) {
-        $this->logger->info('Carfac: Fetching products via Part/GetParts using paged extendedView=false response');
+        $this->logger->info('Carfac: Fetching products via Part/GetParts using paged extendedView=true response');
         $products = $this->get_products_from_parts_paged($params);
         if (is_wp_error($products)) {
             return $products;
@@ -872,7 +888,9 @@ class Carfac_Provider implements API_Provider_Interface {
             'descriptionGerman' => null,
             'descriptionEnglish' => null,
             'lastSellingDate' => null,
-            'extendedView' => false,
+            // Extended view contains Carfac's additional pricing fields,
+            // including Tijdelijke Prijs / temporary sale pricing.
+            'extendedView' => true,
             'visibleOnWebshop' => null,
             'webshopGroupLinkId' => null,
             'paging' => [

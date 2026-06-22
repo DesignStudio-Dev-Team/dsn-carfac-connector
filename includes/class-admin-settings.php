@@ -208,13 +208,6 @@ class Admin_Settings {
         register_setting('DSN_CARFAC_settings', 'DSN_CARFAC_carfac_username');
         register_setting('DSN_CARFAC_settings', 'DSN_CARFAC_carfac_password');
         register_setting('DSN_CARFAC_settings', 'DSN_CARFAC_sync_frequency');
-        register_setting('DSN_CARFAC_settings', 'DSN_CARFAC_use_sale_price', [
-            'type' => 'string',
-            'default' => '1',
-            'sanitize_callback' => function($val) {
-                return $val === '1' ? '1' : '0';
-            },
-        ]);
         register_setting('DSN_CARFAC_settings', 'DSN_CARFAC_log_product_payloads');
         register_setting('DSN_CARFAC_settings', 'DSN_CARFAC_sync_batch_size', [
             'type' => 'integer',
@@ -281,14 +274,6 @@ class Admin_Settings {
             __('Sync Settings', 'dsn-carfac'),
             array($this, 'render_sync_section_info'),
             'dsn-carfac'
-        );
-
-        add_settings_field(
-            'DSN_CARFAC_use_sale_price',
-            __('Use Carfac Temporary Sale Price', 'dsn-carfac'),
-            array($this, 'render_use_sale_price_field'),
-            'dsn-carfac',
-            'DSN_CARFAC_sync_section'
         );
 
         add_settings_field(
@@ -462,27 +447,6 @@ class Admin_Settings {
      */
     public function render_sync_section_info() {
         echo '<p>' . esc_html__('Configure product sync behavior.', 'dsn-carfac') . '</p>';
-    }
-
-    /**
-     * Render Use Carfac Sale Price checkbox field
-     */
-    public function render_use_sale_price_field() {
-        $checked = get_option('DSN_CARFAC_use_sale_price', '1') === '0' ? '0' : '1';
-        ?>
-        <label for="DSN_CARFAC_use_sale_price">
-            <input type="hidden" name="DSN_CARFAC_use_sale_price" value="0">
-            <input type="checkbox"
-                   id="DSN_CARFAC_use_sale_price"
-                   name="DSN_CARFAC_use_sale_price"
-                   value="1"
-                   <?php checked($checked, '1'); ?>>
-            <?php _e('Map Carfac Tijdelijke Prijs to WooCommerce sale price', 'dsn-carfac'); ?>
-        </label>
-        <p class="description">
-            <?php _e('When enabled, Carfac Tijdelijke Prijs / temporary sale price is synced as the WooCommerce sale price. This sale price is treated as incl. VAT.', 'dsn-carfac'); ?>
-        </p>
-        <?php
     }
 
     /**
